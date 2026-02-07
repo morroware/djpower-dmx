@@ -31,7 +31,12 @@ except ImportError:
 app = Flask(__name__)
 
 # Path for persisting scene config across restarts
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+CONFIG_DIR = os.environ.get("DMX_CONFIG_DIR", "/var/lib/dmx")
+CONFIG_FILE = os.environ.get(
+    "DMX_CONFIG_FILE",
+    os.path.join(CONFIG_DIR, "config.json"),
+)
+API_TOKEN = os.environ.get("DMX_API_TOKEN")
 
 # ============================================
 # CONFIGURATION
@@ -170,6 +175,7 @@ config = Config()
 def save_config():
     """Save current scene config and duration to disk"""
     try:
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         data = {
             'scene_b_duration': config.SCENE_B_DURATION,
             'scenes': {}
@@ -197,8 +203,19 @@ def load_config():
         if 'scenes' in data:
             for key, scene in data['scenes'].items():
                 if key in config.SCENES:
+                    safe_channels = {}
+                    raw_channels = scene.get('channels', {})
+                    for ch_key, ch_value in raw_channels.items():
+                        channel = int(ch_key)
+                        value = int(ch_value)
+                        if not (1 <= channel <= config.DMX_CHANNELS):
+                            continue
+                        if channel == 16 and not (50 <= value <= 200):
+                            value = 100
+                        safe_channels[channel] = max(0, min(255, value))
                     config.SCENES[key]['name'] = scene.get('name', config.SCENES[key]['name'])
-                    config.SCENES[key]['channels'] = {int(k): int(v) for k, v in scene['channels'].items()}
+                    if safe_channels:
+                        config.SCENES[key]['channels'] = safe_channels
         print("Loaded saved configuration from disk")
     except Exception as e:
         print(f"WARNING: Could not load config (using defaults): {e}")
@@ -283,14 +300,16 @@ def dmx_refresh_thread():
     consecutive_errors = 0
     MAX_ERRORS_BEFORE_REINIT = 3
     REINIT_BACKOFF = 2.0  # seconds to wait before attempting reinit
+    offline_backoff = 1.0
+    offline_backoff_max = 10.0
 
     print(f"DMX refresh thread started ({config.DMX_REFRESH_RATE} Hz)")
 
     while state.dmx_running:
         try:
+            if state.ftdi_device is None:
+                raise Exception("FTDI device not available")
             with state.dmx_lock:
-                if state.ftdi_device is None:
-                    raise Exception("FTDI device not available")
                 # Send BREAK
                 state.ftdi_device.set_break(True)
                 time.sleep(0.000088)
@@ -301,10 +320,18 @@ def dmx_refresh_thread():
                 state.ftdi_device.write_data(state.dmx_data)
 
             consecutive_errors = 0
+            offline_backoff = 1.0
             time.sleep(refresh_interval)
 
         except Exception as e:
             consecutive_errors += 1
+            if "FTDI device not available" in str(e):
+                print(f"WARNING: DMX refresh offline: {e}")
+                time.sleep(offline_backoff)
+                offline_backoff = min(offline_backoff * 2, offline_backoff_max)
+                reinit_enttec()
+                continue
+
             if consecutive_errors <= MAX_ERRORS_BEFORE_REINIT:
                 print(f"WARNING: DMX refresh error ({consecutive_errors}/{MAX_ERRORS_BEFORE_REINIT}): {e}")
                 time.sleep(0.1)
@@ -355,9 +382,11 @@ def apply_scene(scene_name):
 
     scene = config.SCENES[scene_name]
 
-    # Apply scene values
-    for channel, value in scene['channels'].items():
-        set_channel(int(channel), int(value))
+    # Apply scene values atomically
+    with state.dmx_lock:
+        for channel, value in scene['channels'].items():
+            if 1 <= int(channel) <= config.DMX_CHANNELS:
+                state.dmx_data[int(channel)] = max(0, min(255, int(value)))
 
     state.current_scene = scene_name
     print(f"Applied scene: {scene['name']}")
@@ -542,6 +571,36 @@ def trigger_sequence():
 # Flask Routes
 # ============================================
 
+def _auth_required():
+    return API_TOKEN is not None and API_TOKEN != ""
+
+
+def _authorized():
+    if not _auth_required():
+        return True
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[len("Bearer "):].strip() == API_TOKEN
+    return request.headers.get("X-Api-Token") == API_TOKEN
+
+
+@app.before_request
+def enforce_auth():
+    if request.path.startswith("/api/") and not _authorized():
+        return jsonify({'error': 'Unauthorized'}), 401
+
+
+def _validate_channel(channel):
+    return 1 <= channel <= config.DMX_CHANNELS
+
+
+def _sanitize_channel_value(channel, value):
+    if channel == 16:
+        if not (50 <= value <= 200):
+            raise ValueError("Safety channel must be between 50 and 200")
+    return max(0, min(255, int(value)))
+
+
 @app.route('/')
 def index():
     """Main web interface - serve index.html directly"""
@@ -611,11 +670,16 @@ def api_set_channel():
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid channel or value'}), 400
 
-    if not (1 <= channel <= config.DMX_CHANNELS):
+    if not _validate_channel(channel):
         return jsonify({'error': 'Channel out of range'}), 400
 
-    set_channel(channel, value)
-    return jsonify({'success': True, 'channel': channel, 'value': value})
+    try:
+        safe_value = _sanitize_channel_value(channel, value)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    set_channel(channel, safe_value)
+    return jsonify({'success': True, 'channel': channel, 'value': safe_value})
 
 
 @app.route('/api/blackout', methods=['POST'])
@@ -650,7 +714,12 @@ def api_config():
                     raw = data[scene_key]
                     if not isinstance(raw, dict):
                         return jsonify({'error': f'Invalid data for {scene_key}'}), 400
-                    channels = {int(k): max(0, min(255, int(v))) for k, v in raw.items()}
+                    channels = {}
+                    for k, v in raw.items():
+                        channel = int(k)
+                        if not _validate_channel(channel):
+                            return jsonify({'error': f'Channel out of range in {scene_key}: {channel}'}), 400
+                        channels[channel] = _sanitize_channel_value(channel, int(v))
                 except (TypeError, ValueError):
                     return jsonify({'error': f'Invalid channel data in {scene_key}'}), 400
                 config.SCENES[scene_key]['channels'] = channels
