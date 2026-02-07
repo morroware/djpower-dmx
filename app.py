@@ -8,6 +8,7 @@ from flask import Flask, jsonify, request, send_file
 import time
 import json
 import os
+import glob
 from threading import Lock, Timer, Thread
 
 from pyftdi.ftdi import Ftdi
@@ -41,10 +42,12 @@ class Config:
 
     # GPIO Settings
     CONTACT_PIN = 17
+    GPIO_CHIP = None  # Optional override: int index or string like "gpiochip0" or "/dev/gpiochip0"
 
     # DMX Settings
     DMX_CHANNELS = 512
     DMX_REFRESH_RATE = 44
+    FTDI_URL = os.environ.get("DMX_FTDI_URL", "ftdi://0403:6001/1")
 
     # Timing
     SCENE_B_DURATION = 10.0  # seconds
@@ -216,6 +219,7 @@ class SystemState:
         self.timer_lock = Lock()  # Protects scene_b_timer access
         self.gpio_line = None
         self.gpio_chip = None
+        self.gpio_chip_id = None
         self.gpio_ready = False  # Explicit flag for GPIO readiness
         self.dmx_thread = None
         self.dmx_running = False
@@ -240,7 +244,7 @@ def init_enttec():
         print(f"Found {len(devices)} FTDI device(s)")
 
         state.ftdi_device = Ftdi()
-        state.ftdi_device.open_from_url('ftdi://ftdi:232/1')
+        state.ftdi_device.open_from_url(config.FTDI_URL)
 
         # Configure for DMX512
         state.ftdi_device.set_baudrate(250000)
@@ -386,36 +390,113 @@ def get_current_channels():
 # GPIO Functions
 # ============================================
 
+def _normalize_gpiochip_id(chip_id):
+    if chip_id is None:
+        return None
+    if isinstance(chip_id, int):
+        return chip_id
+    chip_id = str(chip_id).strip()
+    if chip_id.isdigit():
+        return int(chip_id)
+    if chip_id.startswith("/dev/") or chip_id.startswith("gpiochip"):
+        return chip_id
+    return chip_id
+
+
+def _gpiochip_candidates():
+    if config.GPIO_CHIP is not None:
+        return [_normalize_gpiochip_id(config.GPIO_CHIP)]
+    candidates = []
+    for path in sorted(glob.glob("/dev/gpiochip*")):
+        candidates.append(path)
+    return candidates
+
+
+def _open_gpiod_line(chip_id):
+    chip_id = _normalize_gpiochip_id(chip_id)
+    chip = gpiod.Chip(chip_id) if chip_id is not None else None
+    try:
+        line = chip.get_line(config.CONTACT_PIN)
+        line.request(
+            consumer="dmx_controller",
+            type=gpiod.LINE_REQ_DIR_IN,
+            flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP,
+        )
+        return chip, line
+    except Exception:
+        if chip is not None:
+            try:
+                chip.close()
+            except Exception:
+                pass
+        raise
+
+
+def _open_lgpio_line(chip_id):
+    chip_id = _normalize_gpiochip_id(chip_id)
+    if isinstance(chip_id, str):
+        digits = "".join(ch for ch in chip_id if ch.isdigit())
+        chip_id = int(digits) if digits else None
+    chip_id = 0 if chip_id is None else chip_id
+    chip = lgpio.gpiochip_open(chip_id)
+    try:
+        lgpio.gpio_claim_input(chip, config.CONTACT_PIN, lgpio.SET_PULL_UP)
+        return chip
+    except Exception:
+        try:
+            lgpio.gpiochip_close(chip)
+        except Exception:
+            pass
+        raise
+
+
 def init_gpio():
     """Initialize GPIO for contact closure detection"""
     if not GPIO_AVAILABLE:
         print("GPIO not available (not running on Raspberry Pi)")
         return False
 
+    if state.gpio_line is not None or state.gpio_chip is not None:
+        try:
+            if GPIO_LIB == 'gpiod' and state.gpio_line is not None:
+                state.gpio_line.release()
+            if GPIO_LIB == 'gpiod' and state.gpio_chip is not None:
+                state.gpio_chip.close()
+            if GPIO_LIB == 'lgpio' and state.gpio_chip is not None:
+                lgpio.gpiochip_close(state.gpio_chip)
+        except Exception as e:
+            print(f"WARNING: GPIO cleanup before init failed: {e}")
+        state.gpio_line = None
+        state.gpio_chip = None
+        state.gpio_chip_id = None
+
     try:
         if GPIO_LIB == 'gpiod':
-            state.gpio_chip = gpiod.Chip('gpiochip4')
-            state.gpio_line = state.gpio_chip.get_line(config.CONTACT_PIN)
-            state.gpio_line.request(
-                consumer="dmx_controller",
-                type=gpiod.LINE_REQ_DIR_IN,
-                flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP,
-            )
-            state.gpio_ready = True
-            print(f"GPIO initialized (gpiod) - Pin {config.CONTACT_PIN} with pull-up")
-            return True
+            for chip_id in _gpiochip_candidates():
+                try:
+                    state.gpio_chip, state.gpio_line = _open_gpiod_line(chip_id)
+                    state.gpio_ready = True
+                    state.gpio_chip_id = chip_id
+                    print(f"GPIO initialized (gpiod) - {chip_id} pin {config.CONTACT_PIN} with pull-up")
+                    return True
+                except Exception as e:
+                    print(f"GPIO init failed on {chip_id}: {e}")
 
         elif GPIO_LIB == 'lgpio':
-            state.gpio_chip = lgpio.gpiochip_open(4)
-            lgpio.gpio_claim_input(state.gpio_chip, config.CONTACT_PIN, lgpio.SET_PULL_UP)
-            state.gpio_ready = True
-            print(f"GPIO initialized (lgpio) - Pin {config.CONTACT_PIN} with pull-up")
-            return True
+            for chip_id in _gpiochip_candidates():
+                try:
+                    state.gpio_chip = _open_lgpio_line(chip_id)
+                    state.gpio_ready = True
+                    state.gpio_chip_id = chip_id
+                    print(f"GPIO initialized (lgpio) - {chip_id} pin {config.CONTACT_PIN} with pull-up")
+                    return True
+                except Exception as e:
+                    print(f"GPIO init failed on {chip_id}: {e}")
 
     except Exception as e:
         print(f"GPIO initialization failed: {e}")
-        state.gpio_ready = False
-        return False
+    state.gpio_ready = False
+    return False
 
 
 def check_contact_state():
@@ -635,6 +716,8 @@ def main():
             def gpio_monitor():
                 last_state = None
                 last_trigger_time = 0.0
+                consecutive_errors = 0
+                max_errors_before_reinit = 3
 
                 while True:
                     try:
@@ -647,9 +730,19 @@ def main():
                                 last_trigger_time = now
                                 trigger_sequence()
                             last_state = current_state
+                            consecutive_errors = 0
                         time.sleep(0.05)  # 50ms poll - fast enough for human-speed contact closures
                     except Exception as e:
-                        print(f"WARNING: GPIO monitor error (recovering): {e}")
+                        consecutive_errors += 1
+                        print(f"WARNING: GPIO monitor error ({consecutive_errors}/{max_errors_before_reinit}): {e}")
+                        if consecutive_errors >= max_errors_before_reinit:
+                            print("Attempting GPIO re-initialization...")
+                            state.gpio_ready = False
+                            if init_gpio():
+                                print("GPIO re-initialized successfully")
+                                consecutive_errors = 0
+                            else:
+                                print("GPIO re-init failed; will retry")
                         time.sleep(1.0)  # Back off on error, then continue
 
             gpio_thread = Thread(target=gpio_monitor, daemon=True)
@@ -671,6 +764,16 @@ def main():
                 state.ftdi_device.close()
             except Exception:
                 pass
+        if GPIO_AVAILABLE and state.gpio_ready:
+            try:
+                if GPIO_LIB == 'gpiod' and state.gpio_line is not None:
+                    state.gpio_line.release()
+                if GPIO_LIB == 'gpiod' and state.gpio_chip is not None:
+                    state.gpio_chip.close()
+                if GPIO_LIB == 'lgpio' and state.gpio_chip is not None:
+                    lgpio.gpiochip_close(state.gpio_chip)
+            except Exception as e:
+                print(f"WARNING: GPIO cleanup failed: {e}")
         print("Shutdown complete")
 
 
