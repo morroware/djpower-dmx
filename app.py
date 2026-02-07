@@ -639,7 +639,9 @@ def api_blackout():
 def api_config():
     """Get or update configuration"""
     if request.method == 'POST':
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({'error': 'Invalid or missing JSON body'}), 400
 
         # Update any scene
         for scene_key in ['scene_a', 'scene_b', 'scene_c', 'scene_d']:
@@ -697,10 +699,9 @@ def main():
     # Load saved config before anything else
     load_config()
 
-    # Initialize ENTTEC
+    # Initialize ENTTEC (do not exit if the adapter isn't present yet)
     if not init_enttec():
-        print("Failed to initialize ENTTEC. Exiting.")
-        return
+        print("WARNING: ENTTEC not available at startup. Will keep retrying in the background.")
 
     # Start continuous DMX refresh
     start_dmx_refresh()
