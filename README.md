@@ -182,8 +182,6 @@ Edit scene presets and timing in `app.py` (or `/opt/dmx/app.py` if installed via
 - `SCENES` - Channel values for each of the four scenes
 - `DMX_FTDI_URL` - Environment variable to select a specific FTDI device (default: `ftdi://0403:6001/1`)
 - `DMX_API_TOKEN` - Optional environment variable to require an API token for `/api/*` endpoints
-- `DMX_CONFIG_DIR` - Optional override for the config directory (default: `/var/lib/dmx`)
-- `DMX_CONFIG_FILE` - Optional override for the full config file path
 
 After editing, restart the service:
 
