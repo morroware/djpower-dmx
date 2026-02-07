@@ -606,11 +606,30 @@
     
     <script>
         // Update status every 2 seconds
-        setInterval(updateStatus, 2000);
+        const statusInterval = setInterval(updateStatus, 2000);
         updateStatus();
         
         let currentChannels = {};
         let activeSlider = null;  // Track slider being dragged to prevent polling overwrite
+        let lastChannelError = 0;
+        let authErrorShown = false;
+        const urlParams = new URLSearchParams(window.location.search);
+        const tokenFromUrl = urlParams.get('token');
+        if (tokenFromUrl) {
+            localStorage.setItem('dmxApiToken', tokenFromUrl);
+            urlParams.delete('token');
+            const newUrl = `${window.location.pathname}${urlParams.toString() ? '?' + urlParams.toString() : ''}`;
+            window.history.replaceState({}, '', newUrl);
+        }
+
+        function getApiHeaders() {
+            const headers = {'Content-Type': 'application/json'};
+            const token = localStorage.getItem('dmxApiToken');
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+            return headers;
+        }
 
         // Toast notification function
         function showToast(message, isError = false) {
@@ -626,8 +645,21 @@
         }
         
         function updateStatus() {
-            fetch('/api/status')
-                .then(response => response.json())
+            fetch('/api/status', {headers: getApiHeaders()})
+                .then(response => {
+                    if (response.status === 401) {
+                        if (!authErrorShown) {
+                            showToast('🔒 API token required', true);
+                            authErrorShown = true;
+                        }
+                        clearInterval(statusInterval);
+                        throw new Error('Unauthorized');
+                    }
+                    if (!response.ok) {
+                        throw new Error('Status request failed');
+                    }
+                    return response.json();
+                })
                 .then(data => {
                     document.getElementById('enttec-status').textContent = data.enttec_connected ? 'OK' : 'ERR';
                     document.getElementById('enttec-status').className = 'status-value ' + (data.enttec_connected ? 'online' : 'offline');
@@ -652,7 +684,10 @@
                         document.getElementById('trigger-duration').value = data.scene_b_duration;
                     }
                 })
-                .catch(error => console.error('Error:', error));
+                .catch(error => {
+                    console.error('Error:', error);
+                    showToast('❌ Failed to fetch status', true);
+                });
         }
         
         function updateSliderDisplays() {
@@ -712,16 +747,31 @@
             // Send to server
             fetch('/api/channel', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: getApiHeaders(),
                 body: JSON.stringify({channel: channel, value: value})
             })
-            .catch(error => console.error('Error:', error));
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Channel update failed');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                const now = Date.now();
+                if (now - lastChannelError > 2000) {
+                    showToast('❌ Error updating channel', true);
+                    lastChannelError = now;
+                }
+            });
         }
         
         function trigger() {
-            fetch('/api/trigger', {method: 'POST'})
-                .then(response => response.json())
-                .then(data => {
+            fetch('/api/trigger', {method: 'POST', headers: getApiHeaders()})
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(({ok, data}) => {
+                    if (!ok) {
+                        throw new Error('Trigger failed');
+                    }
                     if (data.success) {
                         showToast('✅ Trigger activated!');
                         updateStatus();
@@ -741,9 +791,12 @@
         };
 
         function applyScene(sceneName) {
-            fetch(`/api/scene/${sceneName}`, {method: 'POST'})
-                .then(response => response.json())
-                .then(data => {
+            fetch(`/api/scene/${sceneName}`, {method: 'POST', headers: getApiHeaders()})
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(({ok, data}) => {
+                    if (!ok) {
+                        throw new Error('Scene apply failed');
+                    }
                     if (data.success) {
                         showToast('Scene: ' + (sceneNames[sceneName] || sceneName));
                         updateStatus();
@@ -756,9 +809,12 @@
         }
 
         function blackout() {
-            fetch('/api/blackout', {method: 'POST'})
-                .then(response => response.json())
-                .then(data => {
+            fetch('/api/blackout', {method: 'POST', headers: getApiHeaders()})
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(({ok, data}) => {
+                    if (!ok) {
+                        throw new Error('Blackout failed');
+                    }
                     if (data.success) {
                         showToast('🚨 BLACKOUT - All channels zeroed');
                         updateStatus();
@@ -775,13 +831,15 @@
             
             fetch('/api/config', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: getApiHeaders(),
                 body: JSON.stringify({scene_b_duration: duration})
             })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
+            .then(response => response.json().then(data => ({ok: response.ok, data})))
+            .then(({ok, data}) => {
+                if (ok && data.success) {
                     showToast(`✅ Duration: ${duration}s`);
+                } else {
+                    throw new Error('Duration update failed');
                 }
             })
             .catch(error => {
@@ -818,13 +876,15 @@
             
             fetch('/api/config', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: getApiHeaders(),
                 body: JSON.stringify(data)
             })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
+            .then(response => response.json().then(data => ({ok: response.ok, data})))
+            .then(({ok, data}) => {
+                if (ok && data.success) {
                     showToast('✅ Scene saved!');
+                } else {
+                    throw new Error('Scene save failed');
                 }
             })
             .catch(error => {
