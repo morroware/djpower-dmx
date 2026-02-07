@@ -176,8 +176,10 @@ Connect a contact closure between **GPIO pin 17** and **GND**. When the contact 
 Edit scene presets and timing in `app.py` (or `/opt/dmx/app.py` if installed via the installer) under the `Config` class:
 
 - `CONTACT_PIN` - GPIO pin number for trigger input (default: 17)
+- `GPIO_CHIP` - Optional GPIO chip override (e.g., `0`, `gpiochip0`, `/dev/gpiochip0`). Auto-detects if unset.
 - `SCENE_B_DURATION` - How long the triggered scene lasts in seconds (default: 10)
 - `SCENES` - Channel values for each of the four scenes
+- `DMX_FTDI_URL` - Environment variable to select a specific FTDI device (default: `ftdi://0403:6001/1`)
 
 After editing, restart the service:
 
@@ -233,6 +235,8 @@ gpioinfo gpiochip4 2>/dev/null || gpioinfo gpiochip0
 # Test pin 17 manually
 gpioget gpiochip4 17
 ```
+
+If your GPIO chip is not `gpiochip4`, update `GPIO_CHIP` in `app.py` (or set it to `gpiochip0`), or use `gpioget gpiochip0 17` to verify the pin.
 
 ### Web interface not loading
 ```bash
