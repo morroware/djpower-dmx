@@ -106,6 +106,31 @@ chown -R "$RUN_USER":"$RUN_USER" "$CONFIG_DIR"
 ok "Config directory ready"
 
 # ------------------------------------------
+# 3c. Environment file (API token, config path)
+# ------------------------------------------
+ENV_DIR="/etc/dmx"
+ENV_FILE="${ENV_DIR}/dmx.env"
+info "Creating environment file at ${ENV_FILE}..."
+mkdir -p "$ENV_DIR"
+if [ ! -f "$ENV_FILE" ]; then
+    API_TOKEN=$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)
+    cat > "$ENV_FILE" <<EOF
+DMX_API_TOKEN=${API_TOKEN}
+DMX_CONFIG_DIR=${CONFIG_DIR}
+EOF
+    chown root:"$RUN_USER" "$ENV_FILE"
+    chmod 640 "$ENV_FILE"
+    ok "Environment file created with a new API token"
+    info "API token saved to ${ENV_FILE}"
+else
+    ok "Environment file already exists"
+fi
+
+# ------------------------------------------
 # 4. Python virtual environment & packages
 # ------------------------------------------
 info "Setting up Python virtual environment..."
@@ -129,6 +154,7 @@ After=network.target
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${INSTALL_DIR}
+EnvironmentFile=${ENV_FILE}
 ExecStart=${INSTALL_DIR}/venv/bin/gunicorn --workers 1 --threads 4 --bind 0.0.0.0:5000 app:app
 Restart=on-failure
 RestartSec=5

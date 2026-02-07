@@ -12,21 +12,25 @@ import glob
 from threading import Lock, Timer, Thread
 
 from pyftdi.ftdi import Ftdi
+import importlib
+import importlib.util
 
-# Try to import GPIO library (will work on Pi 5)
-try:
-    import gpiod
+# Detect GPIO library (will work on Pi 5)
+GPIO_AVAILABLE = False
+GPIO_LIB = None
+gpiod = None
+lgpio = None
+
+if importlib.util.find_spec("gpiod"):
+    gpiod = importlib.import_module("gpiod")
     GPIO_AVAILABLE = True
     GPIO_LIB = 'gpiod'
-except ImportError:
-    try:
-        import lgpio
-        GPIO_AVAILABLE = True
-        GPIO_LIB = 'lgpio'
-    except ImportError:
-        GPIO_AVAILABLE = False
-        GPIO_LIB = None
-        print("WARNING: No GPIO library available")
+elif importlib.util.find_spec("lgpio"):
+    lgpio = importlib.import_module("lgpio")
+    GPIO_AVAILABLE = True
+    GPIO_LIB = 'lgpio'
+else:
+    print("WARNING: No GPIO library available")
 
 app = Flask(__name__)
 
@@ -445,6 +449,23 @@ def _open_gpiod_line(chip_id):
     chip_id = _normalize_gpiochip_id(chip_id)
     chip = gpiod.Chip(chip_id) if chip_id is not None else None
     try:
+        if hasattr(gpiod, "request_lines") and hasattr(gpiod, "LineSettings"):
+            direction_enum = getattr(gpiod, "LineDirection", None)
+            bias_enum = getattr(gpiod, "LineBias", None)
+            if direction_enum is None and hasattr(gpiod, "line"):
+                direction_enum = gpiod.line.Direction
+                bias_enum = gpiod.line.Bias
+            line_settings = gpiod.LineSettings(
+                direction=direction_enum.INPUT,
+                bias=bias_enum.PULL_UP,
+            )
+            request = gpiod.request_lines(
+                chip,
+                consumer="dmx_controller",
+                config={config.CONTACT_PIN: line_settings},
+            )
+            return chip, request
+
         line = chip.get_line(config.CONTACT_PIN)
         line.request(
             consumer="dmx_controller",
@@ -535,7 +556,10 @@ def check_contact_state():
 
     try:
         if GPIO_LIB == 'gpiod':
-            return state.gpio_line.get_value()
+            try:
+                return state.gpio_line.get_value()
+            except TypeError:
+                return state.gpio_line.get_value(config.CONTACT_PIN)
         elif GPIO_LIB == 'lgpio':
             return lgpio.gpio_read(state.gpio_chip, config.CONTACT_PIN)
     except Exception as e:
