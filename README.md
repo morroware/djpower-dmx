@@ -11,6 +11,7 @@ A Python-based DMX lighting controller for the **DJPOWER H-IP20V** fog machine (
 - **Live Control** - Real-time sliders for fog, LEDs (RGBA), strobe, dimmer, and effects
 - **Emergency Blackout** - One-button kill to zero all channels instantly
 - **Auto-start** - Runs as a systemd service, starts on boot
+- **Optional API Token** - Protect API endpoints with a simple bearer token
 
 ## Hardware Requirements
 
@@ -163,7 +164,7 @@ Access the web interface at `http://<your-pi-ip>:5000`
 - **Strobe** - Strobe speed
 - **Outer / Inner LEDs** - Individual RGBA color control
 - **LED Effects** - Mix colors and auto-color cycling
-- **Safety Channel** - Must be in the 50-200 range for the fixture to operate
+- **Safety Channel** - Must be in the 50-200 range for the fixture to operate (the API enforces this range)
 
 ### Scene Editor
 Adjust controls to your desired settings, pick a scene slot (A-D), and click **Save Current Settings to Scene** to store them for quick recall.
@@ -180,12 +181,50 @@ Edit scene presets and timing in `app.py` (or `/opt/dmx/app.py` if installed via
 - `SCENE_B_DURATION` - How long the triggered scene lasts in seconds (default: 10)
 - `SCENES` - Channel values for each of the four scenes
 - `DMX_FTDI_URL` - Environment variable to select a specific FTDI device (default: `ftdi://0403:6001/1`)
+- `DMX_API_TOKEN` - Optional environment variable to require an API token for `/api/*` endpoints
 
 After editing, restart the service:
 
 ```bash
 sudo systemctl restart dmx
 ```
+
+### API Authentication (Optional)
+
+If you set `DMX_API_TOKEN`, all `/api/*` requests must include it:
+
+```bash
+export DMX_API_TOKEN="your-secret-token"
+```
+
+For the systemd service, add an override:
+
+```bash
+sudo systemctl edit dmx
+```
+
+Then add:
+
+```ini
+[Service]
+Environment=DMX_API_TOKEN=your-secret-token
+```
+
+Reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart dmx
+```
+
+Send the token via either header:
+
+- `Authorization: Bearer <token>`
+- `X-Api-Token: <token>`
+
+> **Note:** Without a token, the API is open to anyone with network access to port 5000.
+
+The built-in web UI supports tokens by adding `?token=<your-token>` once in the URL. It will store the token in your browser and remove it from the URL on refresh.
 
 ## API Endpoints
 
@@ -228,6 +267,9 @@ sudo -u $USER venv/bin/python3 app.py
 ```bash
 # Verify gpiod is installed
 dpkg -l | grep gpiod
+
+# Verify lgpio is installed (optional alternative)
+dpkg -l | grep lgpio
 
 # Check GPIO chip is accessible
 gpioinfo gpiochip4 2>/dev/null || gpioinfo gpiochip0
