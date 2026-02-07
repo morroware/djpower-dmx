@@ -610,7 +610,8 @@
         updateStatus();
         
         let currentChannels = {};
-        
+        let activeSlider = null;  // Track slider being dragged to prevent polling overwrite
+
         // Toast notification function
         function showToast(message, isError = false) {
             const toast = document.createElement('div');
@@ -673,6 +674,8 @@
             };
             for (const [key, [valueId, sliderId]] of Object.entries(sliderMap)) {
                 if (currentChannels[key] !== undefined) {
+                    // Don't overwrite a slider the user is actively dragging
+                    if (sliderId === activeSlider) continue;
                     document.getElementById(valueId).textContent = currentChannels[key];
                     document.getElementById(sliderId).value = currentChannels[key];
                 }
@@ -830,6 +833,14 @@
             });
         }
         
+        // Prevent polling from overwriting sliders while user is dragging
+        document.querySelectorAll('input[type="range"]').forEach(slider => {
+            slider.addEventListener('mousedown', () => { activeSlider = slider.id; });
+            slider.addEventListener('touchstart', () => { activeSlider = slider.id; });
+        });
+        document.addEventListener('mouseup', () => { activeSlider = null; });
+        document.addEventListener('touchend', () => { activeSlider = null; });
+
         function showTab(tabName, btn) {
             // Hide all tab contents
             document.querySelectorAll('.tab-content').forEach(tc => {

@@ -621,13 +621,17 @@ def api_set_channel():
 @app.route('/api/blackout', methods=['POST'])
 def api_blackout():
     """Emergency blackout - all channels to zero"""
-    if state.scene_b_timer is not None:
-        state.scene_b_timer.cancel()
+    with state.timer_lock:
+        if state.scene_b_timer is not None:
+            state.scene_b_timer.cancel()
+            state.scene_b_timer = None
     with state.dmx_lock:
         for i in range(1, config.DMX_CHANNELS + 1):
             state.dmx_data[i] = 0
+        # Keep safety channel valid so fixture stays responsive to future commands
+        state.dmx_data[16] = 100
     state.current_scene = None
-    print("⚫ BLACKOUT - All channels zeroed")
+    print("BLACKOUT - All channels zeroed (safety channel kept valid)")
     return jsonify({'success': True})
 
 
@@ -640,16 +644,30 @@ def api_config():
         # Update any scene
         for scene_key in ['scene_a', 'scene_b', 'scene_c', 'scene_d']:
             if scene_key in data:
-                config.SCENES[scene_key]['channels'] = {int(k): int(v) for k, v in data[scene_key].items()}
+                try:
+                    raw = data[scene_key]
+                    if not isinstance(raw, dict):
+                        return jsonify({'error': f'Invalid data for {scene_key}'}), 400
+                    channels = {int(k): max(0, min(255, int(v))) for k, v in raw.items()}
+                except (TypeError, ValueError):
+                    return jsonify({'error': f'Invalid channel data in {scene_key}'}), 400
+                config.SCENES[scene_key]['channels'] = channels
                 print(f"Updated {scene_key}: {config.SCENES[scene_key]['channels']}")
                 # Re-apply if it's the current scene
                 if state.current_scene == scene_key:
                     apply_scene(scene_key)
 
-        # Update duration
+        # Update duration (clamp to safe range)
         if 'scene_b_duration' in data:
-            config.SCENE_B_DURATION = float(data['scene_b_duration'])
-            print(f"Updated Scene B duration: {config.SCENE_B_DURATION}s")
+            try:
+                dur = float(data['scene_b_duration'])
+                if dur != dur:  # NaN check
+                    return jsonify({'error': 'Invalid duration value'}), 400
+                dur = max(0.5, min(300.0, dur))
+                config.SCENE_B_DURATION = dur
+                print(f"Updated Scene B duration: {config.SCENE_B_DURATION}s")
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Invalid duration value'}), 400
 
         # Persist to disk
         save_config()
@@ -705,14 +723,16 @@ def main():
     if GPIO_AVAILABLE and state.gpio_ready:
         print(f"   GPIO Pin {config.CONTACT_PIN} monitoring active")
     elif GPIO_AVAILABLE:
-        print(f"   GPIO available but init failed - no trigger monitoring")
+        print(f"   GPIO available but init failed - monitor will retry automatically")
     print("=" * 60)
     print()
 
     # Start Flask app
     try:
         # GPIO monitoring with debounce and error recovery
-        if GPIO_AVAILABLE and state.gpio_ready:
+        # Always start the monitor thread if GPIO libraries are available, so it
+        # can recover from transient init failures at boot.
+        if GPIO_AVAILABLE:
             def gpio_monitor():
                 last_state = None
                 last_trigger_time = 0.0
@@ -721,6 +741,15 @@ def main():
 
                 while True:
                     try:
+                        # If GPIO isn't ready yet, attempt initialization
+                        if not state.gpio_ready:
+                            if init_gpio():
+                                print("GPIO initialized from monitor thread")
+                                last_state = None  # Reset edge detection
+                            else:
+                                time.sleep(5.0)  # Retry init every 5s
+                                continue
+
                         current_state = check_contact_state()
                         if current_state is not None:
                             now = time.monotonic()
@@ -738,11 +767,8 @@ def main():
                         if consecutive_errors >= max_errors_before_reinit:
                             print("Attempting GPIO re-initialization...")
                             state.gpio_ready = False
-                            if init_gpio():
-                                print("GPIO re-initialized successfully")
-                                consecutive_errors = 0
-                            else:
-                                print("GPIO re-init failed; will retry")
+                            last_state = None  # Reset edge detection after reinit
+                            consecutive_errors = 0
                         time.sleep(1.0)  # Back off on error, then continue
 
             gpio_thread = Thread(target=gpio_monitor, daemon=True)
