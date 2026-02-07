@@ -31,7 +31,11 @@ except ImportError:
 app = Flask(__name__)
 
 # Path for persisting scene config across restarts
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+CONFIG_DIR = os.environ.get("DMX_CONFIG_DIR", "/var/lib/dmx")
+CONFIG_FILE = os.environ.get(
+    "DMX_CONFIG_FILE",
+    os.path.join(CONFIG_DIR, "config.json"),
+)
 API_TOKEN = os.environ.get("DMX_API_TOKEN")
 
 # ============================================
@@ -171,6 +175,7 @@ config = Config()
 def save_config():
     """Save current scene config and duration to disk"""
     try:
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         data = {
             'scene_b_duration': config.SCENE_B_DURATION,
             'scenes': {}

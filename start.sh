@@ -4,4 +4,4 @@ cd "$SCRIPT_DIR"
 if [ -d "venv" ]; then
     source venv/bin/activate
 fi
-python3 app.py
+exec gunicorn --workers 1 --threads 4 --bind 0.0.0.0:5000 app:app

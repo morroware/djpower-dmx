@@ -94,7 +94,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Run manually
+# Run manually (uses gunicorn)
 ./start.sh
 ```
 
@@ -124,7 +124,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$(pwd)
-ExecStart=$(pwd)/venv/bin/python3 $(pwd)/app.py
+ExecStart=$(pwd)/venv/bin/gunicorn --workers 1 --threads 4 --bind 0.0.0.0:5000 app:app
 Restart=on-failure
 RestartSec=5
 SupplementaryGroups=plugdev gpio
@@ -174,7 +174,7 @@ Connect a contact closure between **GPIO pin 17** and **GND**. When the contact 
 
 ## Configuration
 
-Edit scene presets and timing in `app.py` (or `/opt/dmx/app.py` if installed via the installer) under the `Config` class:
+Edit scene presets and timing in `app.py` (or `/opt/dmx/app.py` if installed via the installer) under the `Config` class. The controller persists scene updates to `/var/lib/dmx/config.json` by default.
 
 - `CONTACT_PIN` - GPIO pin number for trigger input (default: 17)
 - `GPIO_CHIP` - Optional GPIO chip override (e.g., `0`, `gpiochip0`, `/dev/gpiochip0`). Auto-detects if unset.

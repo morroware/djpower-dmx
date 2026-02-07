@@ -97,6 +97,15 @@ chown -R "$RUN_USER":"$RUN_USER" "$INSTALL_DIR"
 ok "Application files copied"
 
 # ------------------------------------------
+# 3b. Persistent config directory
+# ------------------------------------------
+CONFIG_DIR="/var/lib/dmx"
+info "Creating config directory at ${CONFIG_DIR}..."
+mkdir -p "$CONFIG_DIR"
+chown -R "$RUN_USER":"$RUN_USER" "$CONFIG_DIR"
+ok "Config directory ready"
+
+# ------------------------------------------
 # 4. Python virtual environment & packages
 # ------------------------------------------
 info "Setting up Python virtual environment..."
@@ -120,7 +129,7 @@ After=network.target
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/venv/bin/python3 ${INSTALL_DIR}/app.py
+ExecStart=${INSTALL_DIR}/venv/bin/gunicorn --workers 1 --threads 4 --bind 0.0.0.0:5000 app:app
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -128,6 +137,12 @@ StandardError=journal
 
 # Give access to USB and GPIO
 SupplementaryGroups=plugdev gpio
+
+# Improve timing stability for DMX output
+Nice=-10
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=10
+LimitRTPRIO=10
 
 [Install]
 WantedBy=multi-user.target
