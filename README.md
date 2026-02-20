@@ -12,6 +12,8 @@ A Python-based DMX lighting controller for the **DJPOWER H-IP20V** fog machine (
 - **Emergency Blackout** - One-button kill to zero all channels instantly
 - **Auto-start** - Runs as a systemd service, starts on boot
 - **Optional API Token** - Protect API endpoints with a simple bearer token
+- **Health Check** - `/api/health` endpoint for monitoring and install verification
+- **Auto-recovery** - Automatic ENTTEC USB reconnection and GPIO re-initialization
 
 ## Hardware Requirements
 
@@ -23,9 +25,9 @@ A Python-based DMX lighting controller for the **DJPOWER H-IP20V** fog machine (
 ### Wiring
 
 ```
-Raspberry Pi USB ──► ENTTEC Open DMX USB ──► (XLR) ──► DJPOWER H-IP20V
+Raspberry Pi USB --> ENTTEC Open DMX USB --> (XLR) --> DJPOWER H-IP20V
 
-GPIO Pin 17 ──► Contact closure switch ──► GND
+GPIO Pin 17 --> Contact closure switch --> GND
 ```
 
 ## DMX Channel Map (16-channel mode)
@@ -33,7 +35,7 @@ GPIO Pin 17 ──► Contact closure switch ──► GND
 | Channel | Function           | Range                                  |
 |---------|--------------------|----------------------------------------|
 | 1       | Fog output         | 0-9 Off, 10-255 On                    |
-| 2       | *(Disabled)*       | —                                      |
+| 2       | *(Disabled)*       | --                                     |
 | 3       | Outer LED Red      | 0-9 Off, 10-255 Dim to bright         |
 | 4       | Outer LED Green    | 0-9 Off, 10-255 Dim to bright         |
 | 5       | Outer LED Blue     | 0-9 Off, 10-255 Dim to bright         |
@@ -51,12 +53,12 @@ GPIO Pin 17 ──► Contact closure switch ──► GND
 
 ## Quick Install (Recommended)
 
-The installer handles everything: system packages, Python venv, udev rules, and systemd service.
+The installer handles everything: system packages, Python venv, FTDI kernel module blacklisting, udev rules, and systemd service.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/CastleLabs/dmx.git
-cd dmx
+git clone https://github.com/morroware/djpower-dmx.git
+cd djpower-dmx
 
 # 2. Run the installer
 sudo ./install.sh
@@ -68,12 +70,44 @@ Open `http://<your-pi-ip>:5000` in a browser to access the web interface.
 
 ### What the installer does
 
-1. Installs system packages (`python3`, `python3-venv`, `libusb-1.0`, `libgpiod-dev`)
-2. Creates udev rules so the ENTTEC adapter is accessible without root
-3. Copies application files to `/opt/dmx`
-4. Creates a Python virtual environment and installs dependencies
-5. Creates and enables a `dmx` systemd service
-6. Starts the service
+1. Installs system packages (`python3`, `python3-venv`, `libusb-1.0`, `libgpiod-dev`, `curl`)
+2. Blacklists the `ftdi_sio` kernel module so pyftdi can access the ENTTEC adapter
+3. Creates udev rules so the ENTTEC adapter is accessible without root
+4. Stops any existing DMX service (safe for reinstalls/upgrades)
+5. Copies application files to `/opt/dmx`
+6. Creates a Python virtual environment and installs dependencies
+7. Generates an API token and stores it in `/etc/dmx/dmx.env`
+8. Creates and enables a `dmx` systemd service
+9. Starts the service and runs a health check
+10. Displays the web interface URL and API token
+
+### Reinstalling / Upgrading
+
+Just re-run the installer. It is idempotent:
+
+```bash
+cd djpower-dmx
+git pull
+sudo ./install.sh
+```
+
+Existing configuration (`/var/lib/dmx/config.json`) and API tokens (`/etc/dmx/dmx.env`) are preserved across reinstalls.
+
+## Uninstall
+
+Run the included uninstall script:
+
+```bash
+sudo ./uninstall.sh
+```
+
+This will:
+- Stop and disable the systemd service
+- Remove application files from `/opt/dmx`
+- Remove udev rules and the ftdi_sio blacklist
+- Optionally remove saved configuration and API tokens (you will be prompted)
+
+System packages (`python3`, `libusb`, etc.) are left in place.
 
 ## Manual Installation
 
@@ -83,11 +117,15 @@ If you prefer to set things up yourself:
 # System packages
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip python3-dev \
-    libusb-1.0-0-dev libgpiod-dev git
+    libusb-1.0-0-dev libgpiod-dev curl git
+
+# Blacklist ftdi_sio (required for ENTTEC access)
+echo "blacklist ftdi_sio" | sudo tee /etc/modprobe.d/ftdi-blacklist.conf
+sudo rmmod ftdi_sio 2>/dev/null || true
 
 # Clone
-git clone https://github.com/CastleLabs/dmx.git
-cd dmx
+git clone https://github.com/morroware/djpower-dmx.git
+cd djpower-dmx
 
 # Python environment
 python3 -m venv venv
@@ -191,29 +229,23 @@ sudo systemctl restart dmx
 
 ### API Authentication (Optional)
 
-If you set `DMX_API_TOKEN`, all `/api/*` requests must include it:
+If installed via `install.sh`, an API token is automatically generated and stored in `/etc/dmx/dmx.env`. The installer prints the token at the end of the installation.
+
+To view the current token:
 
 ```bash
-export DMX_API_TOKEN="your-secret-token"
+sudo cat /etc/dmx/dmx.env
 ```
 
-For the systemd service, add an override:
+To set a custom token manually, edit the environment file:
 
 ```bash
-sudo systemctl edit dmx
+sudo nano /etc/dmx/dmx.env
 ```
 
-Then add:
-
-```ini
-[Service]
-Environment=DMX_API_TOKEN=your-secret-token
-```
-
-Reload and restart:
+Then restart the service:
 
 ```bash
-sudo systemctl daemon-reload
 sudo systemctl restart dmx
 ```
 
@@ -228,16 +260,36 @@ The built-in web UI supports tokens by adding `?token=<your-token>` once in the 
 
 ## API Endpoints
 
-| Method   | Endpoint            | Description                                |
-|----------|---------------------|--------------------------------------------|
-| GET      | `/`                 | Web interface                              |
-| GET      | `/api/status`       | System status and channel values           |
-| POST     | `/api/trigger`      | Fire the trigger sequence                  |
-| POST     | `/api/scene/<name>` | Apply a scene (scene_a through scene_d)    |
-| GET      | `/api/scenes`       | List all scenes and their channels         |
-| POST     | `/api/channel`      | Set a single channel `{channel, value}`    |
-| POST     | `/api/blackout`     | Emergency blackout (all channels to 0)     |
-| GET/POST | `/api/config`       | Read or update scene config and duration   |
+| Method   | Endpoint            | Auth | Description                                |
+|----------|---------------------|------|--------------------------------------------|
+| GET      | `/`                 | No   | Web interface                              |
+| GET      | `/api/health`       | No   | Health check (200 = ok, 503 = degraded)    |
+| GET      | `/api/status`       | Yes  | System status and channel values           |
+| POST     | `/api/trigger`      | Yes  | Fire the trigger sequence                  |
+| POST     | `/api/scene/<name>` | Yes  | Apply a scene (scene_a through scene_d)    |
+| GET      | `/api/scenes`       | Yes  | List all scenes and their channels         |
+| POST     | `/api/channel`      | Yes  | Set a single channel `{channel, value}`    |
+| POST     | `/api/blackout`     | Yes  | Emergency blackout (all channels to 0)     |
+| GET/POST | `/api/config`       | Yes  | Read or update scene config and duration   |
+
+**Auth** column: "Yes" means the `DMX_API_TOKEN` is required if one is set. "No" means the endpoint is always accessible.
+
+## File Layout
+
+| Path | Description |
+|------|-------------|
+| `app.py` | Flask application - DMX control, GPIO, API routes |
+| `index.html` | Web UI (dark-themed, responsive) |
+| `install.sh` | Automated installer for Raspberry Pi |
+| `uninstall.sh` | Clean uninstaller |
+| `start.sh` | Manual startup script (loads env, activates venv) |
+| `requirements.txt` | Python dependencies |
+| `/opt/dmx/` | Installed application (created by installer) |
+| `/var/lib/dmx/config.json` | Persisted scene configuration |
+| `/etc/dmx/dmx.env` | API token and environment variables |
+| `/etc/systemd/system/dmx.service` | Systemd service unit |
+| `/etc/udev/rules.d/99-ftdi-dmx.rules` | FTDI USB permissions |
+| `/etc/modprobe.d/ftdi-blacklist.conf` | Blocks ftdi_sio kernel driver |
 
 ## Troubleshooting
 
@@ -245,6 +297,11 @@ The built-in web UI supports tokens by adding `?token=<your-token>` once in the 
 ```bash
 # Check USB devices
 lsusb | grep -i ftdi
+
+# Verify ftdi_sio is NOT loaded (it must be blacklisted)
+lsmod | grep ftdi_sio
+# If it shows output, unload it:
+sudo rmmod ftdi_sio
 
 # Check udev rules are loaded
 sudo udevadm test /sys/bus/usb/devices/*  2>&1 | grep -i ftdi
@@ -258,6 +315,9 @@ ls -la /dev/bus/usb/*/*
 # Check logs for error details
 sudo journalctl -u dmx -n 50 --no-pager
 
+# Run the health check manually
+curl -s http://localhost:5000/api/health | python3 -m json.tool
+
 # Try running manually to see output
 cd /opt/dmx
 sudo -u $USER venv/bin/python3 app.py
@@ -267,9 +327,6 @@ sudo -u $USER venv/bin/python3 app.py
 ```bash
 # Verify gpiod is installed
 dpkg -l | grep gpiod
-
-# Verify lgpio is installed (optional alternative)
-dpkg -l | grep lgpio
 
 # Check GPIO chip is accessible
 gpioinfo gpiochip4 2>/dev/null || gpioinfo gpiochip0
@@ -293,14 +350,20 @@ sudo ufw status
 sudo ufw allow 5000/tcp   # if needed
 ```
 
-## Uninstall
-
+### ftdi_sio kernel module keeps loading
 ```bash
-sudo systemctl stop dmx
-sudo systemctl disable dmx
-sudo rm /etc/systemd/system/dmx.service
-sudo systemctl daemon-reload
-sudo rm -rf /opt/dmx
-sudo rm -f /etc/udev/rules.d/99-ftdi-dmx.rules
-sudo udevadm control --reload-rules
+# Verify the blacklist file exists
+cat /etc/modprobe.d/ftdi-blacklist.conf
+
+# Should contain:
+# blacklist ftdi_sio
+
+# If it doesn't exist, create it:
+echo "blacklist ftdi_sio" | sudo tee /etc/modprobe.d/ftdi-blacklist.conf
+
+# Unload immediately:
+sudo rmmod ftdi_sio
+
+# Restart the service:
+sudo systemctl restart dmx
 ```

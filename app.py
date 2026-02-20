@@ -8,7 +8,11 @@ from flask import Flask, jsonify, request, send_file
 import time
 import json
 import os
+import sys
 import glob
+import atexit
+import signal
+import tempfile
 from threading import Lock, Timer, Thread
 
 from pyftdi.ftdi import Ftdi
@@ -177,9 +181,10 @@ config = Config()
 # ============================================
 
 def save_config():
-    """Save current scene config and duration to disk"""
+    """Save current scene config and duration to disk (atomic write)"""
     try:
-        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        config_dir = os.path.dirname(CONFIG_FILE)
+        os.makedirs(config_dir, exist_ok=True)
         data = {
             'scene_b_duration': config.SCENE_B_DURATION,
             'scenes': {}
@@ -189,8 +194,18 @@ def save_config():
                 'name': scene['name'],
                 'channels': {str(k): v for k, v in scene['channels'].items()}
             }
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        # Write to temp file then atomically rename to prevent corruption
+        fd, tmp_path = tempfile.mkstemp(dir=config_dir, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, CONFIG_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except Exception as e:
         print(f"WARNING: Could not save config: {e}")
 
@@ -445,27 +460,45 @@ def _gpiochip_candidates():
     return candidates
 
 
+def _chip_id_to_path(chip_id):
+    """Normalize a chip identifier to a /dev/gpiochipN path string."""
+    if chip_id is None:
+        return "/dev/gpiochip0"
+    if isinstance(chip_id, int):
+        return f"/dev/gpiochip{chip_id}"
+    chip_id = str(chip_id)
+    if chip_id.isdigit():
+        return f"/dev/gpiochip{chip_id}"
+    if chip_id.startswith("gpiochip"):
+        return f"/dev/{chip_id}"
+    return chip_id  # Already a full path
+
+
 def _open_gpiod_line(chip_id):
     chip_id = _normalize_gpiochip_id(chip_id)
+
+    # gpiod v2 API: request_lines takes a path string, not a Chip object
+    if hasattr(gpiod, "request_lines") and hasattr(gpiod, "LineSettings"):
+        chip_path = _chip_id_to_path(chip_id)
+        direction_enum = getattr(gpiod, "LineDirection", None)
+        bias_enum = getattr(gpiod, "LineBias", None)
+        if direction_enum is None and hasattr(gpiod, "line"):
+            direction_enum = gpiod.line.Direction
+            bias_enum = gpiod.line.Bias
+        line_settings = gpiod.LineSettings(
+            direction=direction_enum.INPUT,
+            bias=bias_enum.PULL_UP,
+        )
+        request = gpiod.request_lines(
+            chip_path,
+            consumer="dmx_controller",
+            config={config.CONTACT_PIN: line_settings},
+        )
+        return None, request  # v2: no separate Chip object needed
+
+    # gpiod v1 API: create Chip then request the line
     chip = gpiod.Chip(chip_id) if chip_id is not None else None
     try:
-        if hasattr(gpiod, "request_lines") and hasattr(gpiod, "LineSettings"):
-            direction_enum = getattr(gpiod, "LineDirection", None)
-            bias_enum = getattr(gpiod, "LineBias", None)
-            if direction_enum is None and hasattr(gpiod, "line"):
-                direction_enum = gpiod.line.Direction
-                bias_enum = gpiod.line.Bias
-            line_settings = gpiod.LineSettings(
-                direction=direction_enum.INPUT,
-                bias=bias_enum.PULL_UP,
-            )
-            request = gpiod.request_lines(
-                chip,
-                consumer="dmx_controller",
-                config={config.CONTACT_PIN: line_settings},
-            )
-            return chip, request
-
         line = chip.get_line(config.CONTACT_PIN)
         line.request(
             consumer="dmx_controller",
@@ -549,17 +582,30 @@ def init_gpio():
     return False
 
 
+def _gpio_value_to_int(val):
+    """Normalize a GPIO read value to int 0 or 1.
+
+    gpiod v2 returns a Value enum (not IntEnum) so direct == comparisons
+    against 0/1 would silently fail.  This helper handles both v1 (int)
+    and v2 (enum) return types.
+    """
+    if hasattr(val, 'value'):
+        return int(val.value)  # enum -> underlying int
+    return int(val)
+
+
 def check_contact_state():
-    """Check current contact closure state"""
+    """Check current contact closure state. Returns 0 (closed) or 1 (open), or None."""
     if not GPIO_AVAILABLE or not state.gpio_ready:
         return None
 
     try:
         if GPIO_LIB == 'gpiod':
             try:
-                return state.gpio_line.get_value()
+                val = state.gpio_line.get_value()
             except TypeError:
-                return state.gpio_line.get_value(config.CONTACT_PIN)
+                val = state.gpio_line.get_value(config.CONTACT_PIN)
+            return _gpio_value_to_int(val)
         elif GPIO_LIB == 'lgpio':
             return lgpio.gpio_read(state.gpio_chip, config.CONTACT_PIN)
     except Exception as e:
@@ -779,32 +825,135 @@ def api_config():
         })
 
 # ============================================
-# Main Entry Point
+# Health Check
 # ============================================
 
-def main():
-    """Initialize and run the application"""
+@app.route('/api/health')
+def api_health():
+    """Health check endpoint for monitoring and install verification."""
+    healthy = state.dmx_running and state.dmx_thread is not None and state.dmx_thread.is_alive()
+    status_code = 200 if healthy else 503
+    return jsonify({
+        'status': 'ok' if healthy else 'degraded',
+        'enttec_connected': state.ftdi_device is not None,
+        'dmx_running': healthy,
+        'gpio_available': GPIO_AVAILABLE,
+        'gpio_ready': state.gpio_ready,
+    }), status_code
+
+# ============================================
+# Initialization & Shutdown
+# ============================================
+
+_initialized = False
+
+
+def _gpio_monitor():
+    """Background thread: polls GPIO for contact closure events with debounce."""
+    last_state = None
+    last_trigger_time = 0.0
+    consecutive_errors = 0
+    max_errors_before_reinit = 3
+
+    while True:
+        try:
+            if not state.gpio_ready:
+                if init_gpio():
+                    print("GPIO initialized from monitor thread")
+                    last_state = None
+                else:
+                    time.sleep(5.0)
+                    continue
+
+            current_state = check_contact_state()
+            if current_state is not None:
+                now = time.monotonic()
+                if (last_state == 1 and current_state == 0
+                        and (now - last_trigger_time) >= config.DEBOUNCE_TIME):
+                    last_trigger_time = now
+                    trigger_sequence()
+                last_state = current_state
+                consecutive_errors = 0
+            time.sleep(0.05)
+        except Exception as e:
+            consecutive_errors += 1
+            print(f"WARNING: GPIO monitor error ({consecutive_errors}/{max_errors_before_reinit}): {e}")
+            if consecutive_errors >= max_errors_before_reinit:
+                print("Attempting GPIO re-initialization...")
+                state.gpio_ready = False
+                last_state = None
+                consecutive_errors = 0
+            time.sleep(1.0)
+
+
+def _cleanup():
+    """Release hardware resources on shutdown."""
+    global _initialized
+    if not _initialized:
+        return
+    _initialized = False
+
+    print("Shutting down DMX controller...")
+    stop_dmx_refresh()
+
+    with state.timer_lock:
+        if state.scene_b_timer:
+            state.scene_b_timer.cancel()
+
+    if state.ftdi_device:
+        try:
+            state.ftdi_device.close()
+        except Exception:
+            pass
+
+    if GPIO_AVAILABLE:
+        try:
+            if GPIO_LIB == 'gpiod' and state.gpio_line is not None:
+                state.gpio_line.release()
+            if GPIO_LIB == 'gpiod' and state.gpio_chip is not None:
+                state.gpio_chip.close()
+            if GPIO_LIB == 'lgpio' and state.gpio_chip is not None:
+                lgpio.gpiochip_close(state.gpio_chip)
+        except Exception as e:
+            print(f"WARNING: GPIO cleanup failed: {e}")
+
+    print("Shutdown complete")
+
+
+def _initialize():
+    """Initialize all hardware and start background threads.
+
+    Safe to call multiple times — only the first call takes effect.
+    Called automatically at module load so that gunicorn workers
+    (which import this module but never call main()) are fully
+    initialized.
+    """
+    global _initialized
+    if _initialized:
+        return
+    _initialized = True
+
     print("=" * 60)
     print("DMX CONTROLLER - DJPOWER H-IP20V Fog Machine")
     print("=" * 60)
     print()
 
-    # Load saved config before anything else
     load_config()
 
-    # Initialize ENTTEC (do not exit if the adapter isn't present yet)
     if not init_enttec():
         print("WARNING: ENTTEC not available at startup. Will keep retrying in the background.")
 
-    # Start continuous DMX refresh
     start_dmx_refresh()
     time.sleep(0.5)
 
-    # Initialize GPIO (optional)
     init_gpio()
-
-    # Apply initial scene (Scene A - Light OFF)
     apply_scene('scene_a')
+
+    if GPIO_AVAILABLE:
+        Thread(target=_gpio_monitor, daemon=True).start()
+
+    # Register cleanup for graceful shutdown
+    atexit.register(_cleanup)
 
     print()
     print("=" * 60)
@@ -817,84 +966,28 @@ def main():
     if GPIO_AVAILABLE and state.gpio_ready:
         print(f"   GPIO Pin {config.CONTACT_PIN} monitoring active")
     elif GPIO_AVAILABLE:
-        print(f"   GPIO available but init failed - monitor will retry automatically")
+        print("   GPIO available but init failed - monitor will retry automatically")
     print("=" * 60)
     print()
 
-    # Start Flask app
+
+def _on_sigterm(_signum, _frame):
+    """Convert SIGTERM to a clean exit so atexit handlers run."""
+    sys.exit(0)
+
+
+# --- Module-level initialization ---
+# This runs when gunicorn imports the module (app:app) OR when run directly.
+signal.signal(signal.SIGTERM, _on_sigterm)
+_initialize()
+
+
+def main():
+    """Entry point for direct execution (python app.py)."""
     try:
-        # GPIO monitoring with debounce and error recovery
-        # Always start the monitor thread if GPIO libraries are available, so it
-        # can recover from transient init failures at boot.
-        if GPIO_AVAILABLE:
-            def gpio_monitor():
-                last_state = None
-                last_trigger_time = 0.0
-                consecutive_errors = 0
-                max_errors_before_reinit = 3
-
-                while True:
-                    try:
-                        # If GPIO isn't ready yet, attempt initialization
-                        if not state.gpio_ready:
-                            if init_gpio():
-                                print("GPIO initialized from monitor thread")
-                                last_state = None  # Reset edge detection
-                            else:
-                                time.sleep(5.0)  # Retry init every 5s
-                                continue
-
-                        current_state = check_contact_state()
-                        if current_state is not None:
-                            now = time.monotonic()
-                            # Detect falling edge (open -> closed) with debounce
-                            if (last_state == 1 and current_state == 0
-                                    and (now - last_trigger_time) >= config.DEBOUNCE_TIME):
-                                last_trigger_time = now
-                                trigger_sequence()
-                            last_state = current_state
-                            consecutive_errors = 0
-                        time.sleep(0.05)  # 50ms poll - fast enough for human-speed contact closures
-                    except Exception as e:
-                        consecutive_errors += 1
-                        print(f"WARNING: GPIO monitor error ({consecutive_errors}/{max_errors_before_reinit}): {e}")
-                        if consecutive_errors >= max_errors_before_reinit:
-                            print("Attempting GPIO re-initialization...")
-                            state.gpio_ready = False
-                            last_state = None  # Reset edge detection after reinit
-                            consecutive_errors = 0
-                        time.sleep(1.0)  # Back off on error, then continue
-
-            gpio_thread = Thread(target=gpio_monitor, daemon=True)
-            gpio_thread.start()
-
         app.run(host='0.0.0.0', port=5000, debug=False)
-
     except KeyboardInterrupt:
         print("\nKeyboard interrupt received")
-    except Exception as e:
-        print(f"\nError: {e}")
-    finally:
-        stop_dmx_refresh()
-        with state.timer_lock:
-            if state.scene_b_timer:
-                state.scene_b_timer.cancel()
-        if state.ftdi_device:
-            try:
-                state.ftdi_device.close()
-            except Exception:
-                pass
-        if GPIO_AVAILABLE and state.gpio_ready:
-            try:
-                if GPIO_LIB == 'gpiod' and state.gpio_line is not None:
-                    state.gpio_line.release()
-                if GPIO_LIB == 'gpiod' and state.gpio_chip is not None:
-                    state.gpio_chip.close()
-                if GPIO_LIB == 'lgpio' and state.gpio_chip is not None:
-                    lgpio.gpiochip_close(state.gpio_chip)
-            except Exception as e:
-                print(f"WARNING: GPIO cleanup failed: {e}")
-        print("Shutdown complete")
 
 
 if __name__ == "__main__":
