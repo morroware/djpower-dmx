@@ -612,6 +612,8 @@
         let currentChannels = {};
         let activeSlider = null;  // Track slider being dragged to prevent polling overwrite
         let lastChannelError = 0;
+        let lastStatusError = 0;
+        let statusErrorCount = 0;
         let authErrorShown = false;
         const urlParams = new URLSearchParams(window.location.search);
         const tokenFromUrl = urlParams.get('token');
@@ -661,6 +663,7 @@
                     return response.json();
                 })
                 .then(data => {
+                    statusErrorCount = 0;
                     document.getElementById('enttec-status').textContent = data.enttec_connected ? 'OK' : 'ERR';
                     document.getElementById('enttec-status').className = 'status-value ' + (data.enttec_connected ? 'online' : 'offline');
                     
@@ -685,8 +688,14 @@
                     }
                 })
                 .catch(error => {
-                    console.error('Error:', error);
-                    showToast('❌ Failed to fetch status', true);
+                    console.error('Status poll error:', error);
+                    statusErrorCount++;
+                    const now = Date.now();
+                    // Only show toast once every 10 seconds to avoid spam
+                    if (now - lastStatusError > 10000) {
+                        showToast('Connection lost - retrying...', true);
+                        lastStatusError = now;
+                    }
                 });
         }
         
