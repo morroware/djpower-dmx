@@ -187,6 +187,47 @@ sudo journalctl -u dmx -f        # Follow live logs
 sudo journalctl -u dmx --since "5 min ago"  # Recent logs
 ```
 
+## ENTTEC Detection Troubleshooting
+
+If the app starts but reports ENTTEC disconnected, use this sequence:
+
+```bash
+# 1) Confirm USB device is present
+lsusb | rg -i '0403|ftdi|enttec'
+
+# 2) Confirm kernel driver is not claiming it
+lsmod | rg ftdi_sio
+
+# 3) Check app health/status payload (includes ENTTEC URL + last error)
+curl -s http://127.0.0.1:5000/api/health | python3 -m json.tool
+curl -s http://127.0.0.1:5000/api/status | python3 -m json.tool
+
+# 4) Check live service logs for URL attempts/open failures
+sudo journalctl -u dmx -f
+```
+
+What to look for:
+
+- `enttec_connected: false` with `enttec_last_error` mentioning permissions:
+  - Re-apply udev rules and re-plug the adapter.
+  - Ensure service user is in `plugdev`.
+- `enttec_last_error` mentioning kernel claim / busy device:
+  - `sudo rmmod ftdi_sio` and reboot if needed.
+- Multiple FTDI devices connected:
+  - Set `DMX_FTDI_URL` explicitly in `/etc/dmx/dmx.env` to the correct adapter.
+
+Example explicit URL:
+
+```bash
+DMX_FTDI_URL=ftdi://0403:6001/1
+```
+
+After changes:
+
+```bash
+sudo systemctl restart dmx
+```
+
 ## Usage
 
 Access the web interface at `http://<your-pi-ip>:5000`

@@ -259,6 +259,8 @@ class SystemState:
         self.gpio_ready = False  # Explicit flag for GPIO readiness
         self.dmx_thread = None
         self.dmx_running = False
+        self.enttec_url = None
+        self.enttec_last_error = None
 
 state = SystemState()
 
@@ -268,6 +270,30 @@ state = SystemState()
 
 def init_enttec():
     """Initialize ENTTEC Open DMX USB"""
+    def _candidate_urls(devices):
+        urls = []
+
+        # Always try explicitly configured URL first.
+        urls.append(config.FTDI_URL)
+
+        # Then try generic FTDI URLs that often work for single-device setups.
+        urls.extend([
+            "ftdi://::/1",
+            "ftdi://::/2",
+            "ftdi://0403:6001/1",
+            "ftdi://0403:6001/2",
+        ])
+
+        # Finally, try serial-targeted URLs from discovered devices.
+        for desc, _iface in devices:
+            serial = getattr(desc, 'sn', None)
+            if serial:
+                urls.append(f"ftdi://::{serial}/1")
+                urls.append(f"ftdi://::{serial}/2")
+
+        # De-dupe while preserving order.
+        return list(dict.fromkeys(urls))
+
     try:
         print("Initializing ENTTEC Open DMX USB...")
 
@@ -275,12 +301,40 @@ def init_enttec():
 
         if not devices:
             print("ERROR: No FTDI devices found!")
+            state.enttec_last_error = "No FTDI devices found"
             return False
 
         print(f"Found {len(devices)} FTDI device(s)")
+        for idx, (desc, _iface) in enumerate(devices, start=1):
+            print(
+                f"  Device {idx}: vid=0x{getattr(desc, 'vid', 0):04x} "
+                f"pid=0x{getattr(desc, 'pid', 0):04x} "
+                f"serial={getattr(desc, 'sn', 'n/a')}"
+            )
 
-        state.ftdi_device = Ftdi()
-        state.ftdi_device.open_from_url(config.FTDI_URL)
+        last_error = None
+        for url in _candidate_urls(devices):
+            try:
+                ftdi = Ftdi()
+                ftdi.open_from_url(url)
+                state.ftdi_device = ftdi
+                state.enttec_url = url
+                state.enttec_last_error = None
+                print(f"Opened FTDI device with URL: {url}")
+                break
+            except Exception as e:
+                last_error = e
+                print(f"  FTDI open failed for {url}: {e}")
+
+        if state.ftdi_device is None:
+            hint = (
+                "Unable to open any detected FTDI device. "
+                "Make sure ftdi_sio is unloaded/blacklisted, udev permissions are set, "
+                "and DMX_FTDI_URL points at the correct adapter/interface."
+            )
+            state.enttec_last_error = f"{hint} Last error: {last_error}"
+            print(f"ERROR: {state.enttec_last_error}")
+            return False
 
         # Configure for DMX512
         state.ftdi_device.set_baudrate(250000)
@@ -291,6 +345,7 @@ def init_enttec():
         return True
 
     except Exception as e:
+        state.enttec_last_error = str(e)
         print(f"ERROR initializing ENTTEC: {e}")
         return False
 
@@ -304,6 +359,7 @@ def reinit_enttec():
             except Exception:
                 pass
             state.ftdi_device = None
+            state.enttec_url = None
         return init_enttec()
     except Exception as e:
         print(f"ERROR re-initializing ENTTEC: {e}")
@@ -684,6 +740,8 @@ def api_status():
 
     return jsonify({
         'enttec_connected': state.ftdi_device is not None,
+        'enttec_url': state.enttec_url,
+        'enttec_last_error': state.enttec_last_error,
         'dmx_running': state.dmx_running and (state.dmx_thread is not None and state.dmx_thread.is_alive()),
         'current_scene': state.current_scene,
         'contact_state': 'closed' if contact_state == 0 else 'open' if contact_state == 1 else 'unknown',
@@ -836,6 +894,8 @@ def api_health():
     return jsonify({
         'status': 'ok' if healthy else 'degraded',
         'enttec_connected': state.ftdi_device is not None,
+        'enttec_url': state.enttec_url,
+        'enttec_last_error': state.enttec_last_error,
         'dmx_running': healthy,
         'gpio_available': GPIO_AVAILABLE,
         'gpio_ready': state.gpio_ready,
@@ -905,6 +965,8 @@ def _cleanup():
             state.ftdi_device.close()
         except Exception:
             pass
+    state.ftdi_device = None
+    state.enttec_url = None
 
     if GPIO_AVAILABLE:
         try:
