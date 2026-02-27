@@ -235,7 +235,7 @@ Access the web interface at `http://<your-pi-ip>:5000`
 ### Quick Controls
 - **Trigger** - Activates Scene B (fog + full LEDs) for the configured duration (default 10 s), then auto-reverts to Scene A
 - **Scene A-D** - Switch between predefined scenes
-- **Emergency Blackout** - Zeros all 512 DMX channels immediately
+- **Emergency Blackout** - Zeros all DMX channels except the safety channel (kept at 100 so the fixture stays responsive)
 
 ### Live Controls
 - **Fog** - Direct fog output level
@@ -243,7 +243,7 @@ Access the web interface at `http://<your-pi-ip>:5000`
 - **Strobe** - Strobe speed
 - **Outer / Inner LEDs** - Individual RGBA color control
 - **LED Effects** - Mix colors and auto-color cycling
-- **Safety Channel** - Must be in the 50-200 range for the fixture to operate (the API enforces this range)
+- **Safety Channel** - Must be in the 50-200 range for the fixture to operate; the API and UI both enforce this valid range
 
 ### Scene Editor
 Adjust controls to your desired settings, pick a scene slot (A-D), and click **Save Current Settings to Scene** to store them for quick recall.
@@ -310,7 +310,7 @@ The built-in web UI supports tokens by adding `?token=<your-token>` once in the 
 | POST     | `/api/scene/<name>` | Yes  | Apply a scene (scene_a through scene_d)    |
 | GET      | `/api/scenes`       | Yes  | List all scenes and their channels         |
 | POST     | `/api/channel`      | Yes  | Set a single channel `{channel, value}`    |
-| POST     | `/api/blackout`     | Yes  | Emergency blackout (all channels to 0)     |
+| POST     | `/api/blackout`     | Yes  | Emergency blackout (safety channel kept valid) |
 | GET/POST | `/api/config`       | Yes  | Read or update scene config and duration   |
 
 **Auth** column: "Yes" means the `DMX_API_TOKEN` is required if one is set. "No" means the endpoint is always accessible.

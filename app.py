@@ -712,6 +712,8 @@ def _authorized():
 
 @app.before_request
 def enforce_auth():
+    if request.path == "/api/health":
+        return None
     if request.path.startswith("/api/") and not _authorized():
         return jsonify({'error': 'Unauthorized'}), 401
 
