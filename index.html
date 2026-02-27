@@ -488,8 +488,9 @@
                 <div class="form-group">
                     <label>Safety Channel <span class="value-display" id="safety-value">100</span></label>
                     <select id="safety" onchange="updateChannel(16, this.value)">
-                        <option value="0">Invalid (Off)</option>
-                        <option value="100" selected>Valid (Active)</option>
+                        <option value="50">Minimum (50)</option>
+                        <option value="100" selected>Default (100)</option>
+                        <option value="200">Maximum (200)</option>
                     </select>
                 </div>
             </div>
@@ -726,6 +727,17 @@
             }
             if (currentChannels.safety !== undefined) {
                 document.getElementById('safety-value').textContent = currentChannels.safety;
+                // Sync the select element to the closest matching option
+                const safetySelect = document.getElementById('safety');
+                const safetyVal = currentChannels.safety;
+                const options = Array.from(safetySelect.options).map(o => parseInt(o.value));
+                let closest = options[0];
+                for (const opt of options) {
+                    if (Math.abs(opt - safetyVal) < Math.abs(closest - safetyVal)) {
+                        closest = opt;
+                    }
+                }
+                safetySelect.value = closest;
             }
         }
         
