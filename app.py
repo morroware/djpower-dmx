@@ -44,7 +44,6 @@ CONFIG_FILE = os.environ.get(
     "DMX_CONFIG_FILE",
     os.path.join(CONFIG_DIR, "config.json"),
 )
-API_TOKEN = os.environ.get("DMX_API_TOKEN")
 
 # ============================================
 # CONFIGURATION
@@ -697,25 +696,6 @@ def trigger_sequence():
 # Flask Routes
 # ============================================
 
-def _auth_required():
-    return API_TOKEN is not None and API_TOKEN != ""
-
-
-def _authorized():
-    if not _auth_required():
-        return True
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        return auth_header[len("Bearer "):].strip() == API_TOKEN
-    return request.headers.get("X-Api-Token") == API_TOKEN
-
-
-@app.before_request
-def enforce_auth():
-    if request.path == "/api/health":
-        return None
-    if request.path.startswith("/api/") and not _authorized():
-        return jsonify({'error': 'Unauthorized'}), 401
 
 
 def _validate_channel(channel):

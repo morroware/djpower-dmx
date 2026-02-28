@@ -615,23 +615,8 @@
         let lastChannelError = 0;
         let lastStatusError = 0;
         let statusErrorCount = 0;
-        let authErrorShown = false;
-        const urlParams = new URLSearchParams(window.location.search);
-        const tokenFromUrl = urlParams.get('token');
-        if (tokenFromUrl) {
-            localStorage.setItem('dmxApiToken', tokenFromUrl);
-            urlParams.delete('token');
-            const newUrl = `${window.location.pathname}${urlParams.toString() ? '?' + urlParams.toString() : ''}`;
-            window.history.replaceState({}, '', newUrl);
-        }
-
         function getApiHeaders() {
-            const headers = {'Content-Type': 'application/json'};
-            const token = localStorage.getItem('dmxApiToken');
-            if (token) {
-                headers['Authorization'] = `Bearer ${token}`;
-            }
-            return headers;
+            return {'Content-Type': 'application/json'};
         }
 
         // Toast notification function
@@ -650,14 +635,6 @@
         function updateStatus() {
             fetch('/api/status', {headers: getApiHeaders()})
                 .then(response => {
-                    if (response.status === 401) {
-                        if (!authErrorShown) {
-                            showToast('🔒 API token required', true);
-                            authErrorShown = true;
-                        }
-                        clearInterval(statusInterval);
-                        throw new Error('Unauthorized');
-                    }
                     if (!response.ok) {
                         throw new Error('Status request failed');
                     }

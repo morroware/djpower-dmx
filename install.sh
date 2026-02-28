@@ -150,29 +150,21 @@ else
 fi
 
 # ------------------------------------------
-# 5c. Environment file (API token, config path)
+# 5c. Environment file (config path)
 # ------------------------------------------
 ENV_DIR="/etc/dmx"
 ENV_FILE="${ENV_DIR}/dmx.env"
 info "Creating environment file at ${ENV_FILE}..."
 mkdir -p "$ENV_DIR"
 if [ ! -f "$ENV_FILE" ]; then
-    API_TOKEN=$(python3 - <<'PY'
-import secrets
-print(secrets.token_hex(32))
-PY
-)
     cat > "$ENV_FILE" <<EOF
-DMX_API_TOKEN=${API_TOKEN}
 DMX_CONFIG_DIR=${CONFIG_DIR}
 EOF
     chown root:"$RUN_USER" "$ENV_FILE"
     chmod 640 "$ENV_FILE"
-    ok "Environment file created with a new API token"
+    ok "Environment file created"
 else
-    ok "Environment file already exists (token preserved)"
-    # Read existing token for display later
-    API_TOKEN=$(grep '^DMX_API_TOKEN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2)
+    ok "Environment file already exists"
 fi
 
 # ------------------------------------------
@@ -282,18 +274,6 @@ else
     echo "  Web interface: http://<your-pi-ip>:5000"
 fi
 
-if [ -n "$API_TOKEN" ]; then
-    echo ""
-    echo -e "  ${YELLOW}API Token:${NC} ${API_TOKEN}"
-    echo "  (stored in ${ENV_FILE})"
-    echo ""
-    echo "  To access the web UI with the token:"
-    if [ -n "$IP" ]; then
-        echo -e "    ${CYAN}http://${IP}:5000?token=${API_TOKEN}${NC}"
-    else
-        echo "    http://<your-pi-ip>:5000?token=<your-token>"
-    fi
-fi
 
 echo ""
 echo "  The service starts automatically on boot."
