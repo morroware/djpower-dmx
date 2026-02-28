@@ -234,14 +234,14 @@ fi
 # ------------------------------------------
 info "Running health check..."
 HEALTH_OK=false
-for i in 1 2 3; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/api/health 2>/dev/null || echo "000")
+for i in 1 2 3 4 5; do
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 http://127.0.0.1:5000/api/health 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "503" ]; then
         # 200 = fully healthy, 503 = degraded (ENTTEC not plugged in) — both mean app is up
         HEALTH_OK=true
         break
     fi
-    sleep 2
+    sleep 3
 done
 
 if [ "$HEALTH_OK" = true ]; then
