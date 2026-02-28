@@ -251,6 +251,153 @@ Adjust controls to your desired settings, pick a scene slot (A-D), and click **S
 ### GPIO Trigger
 Connect a contact closure between **GPIO pin 17** and **GND**. When the contact closes, the controller fires the trigger sequence (same as the web Trigger button). The pin uses an internal pull-up, so no external resistor is needed.
 
+---
+
+## Operator's Guide
+
+This section explains everything an operator needs to know to run the DMX controller safely and effectively.
+
+### Understanding the Safety Channel (Channel 16)
+
+The DJPOWER H-IP20V uses **DMX Channel 16 as a safety interlock**. This is the most important concept for safe operation:
+
+| Safety Channel Value | Fixture Behavior |
+|----------------------|------------------|
+| **0 - 49** | **Invalid** — fixture ignores all DMX commands |
+| **50 - 200** | **Valid** — fixture responds to DMX commands normally |
+| **201 - 255** | **Invalid** — fixture ignores all DMX commands |
+
+**Why it matters:**
+- The safety channel acts as a "dead man's switch." If the controller crashes, loses USB connection, or stops sending DMX frames, the fixture will stop responding on its own because it is no longer receiving a valid safety value.
+- The controller keeps Channel 16 at **100** (the default safe value) during normal operation. You should not need to change this in most cases.
+- The web UI restricts the safety channel to three preset values (50, 100, 200) to prevent accidental out-of-range values.
+- The API enforces the 50-200 range and will reject any request that tries to set it outside that range.
+- If the safety channel somehow gets set to an invalid value (e.g., from a corrupted config file), the controller automatically corrects it to 100 on startup.
+
+**During Emergency Blackout**, the safety channel is deliberately kept at 100 (not zeroed), so the fixture remains responsive to future commands. This means you can recover from a blackout without restarting.
+
+### Pre-Operation Checklist
+
+Before each use:
+
+1. **Check fluid level** — Ensure the fog machine has adequate fog fluid. Running dry can damage the heating element.
+2. **Verify ventilation** — Fog machines produce dense output. Ensure the venue has adequate ventilation and that fog will not obstruct fire exits, smoke detectors, or emergency signage.
+3. **Confirm USB connection** — The ENTTEC adapter should be plugged in before starting the service. Check the web UI status bar: "ENTTEC" should show a green indicator.
+4. **Confirm DMX cable** — Verify the XLR cable between the ENTTEC adapter and the fog machine is securely connected at both ends.
+5. **Allow warm-up time** — The DJPOWER H-IP20V has an internal heater that needs time to reach operating temperature. The machine will not produce fog until it is ready, regardless of DMX commands.
+6. **Test the trigger** — Press the Trigger button in the web UI (or close the GPIO contact) and confirm the machine responds. If using GPIO, verify the contact closure wiring is correct.
+7. **Verify scene settings** — Check that Scene B (the triggered scene) has the fog and lighting values you want. Adjust via the Scene Editor if needed.
+8. **Check the health endpoint** — Visit `http://<pi-ip>:5000/api/health` or check the web UI status indicators. All should show green/connected.
+
+### Understanding the Status Indicators
+
+The web interface displays four status indicators in the header:
+
+| Indicator | Green (OK) | Red (Problem) |
+|-----------|-----------|---------------|
+| **ENTTEC** | USB adapter connected and communicating | Adapter disconnected, kernel driver conflict, or USB error |
+| **DMX** | Background thread is actively sending frames at 44 Hz | DMX refresh thread has stopped |
+| **Scene** | Shows the currently active scene name (A/B/C/D) | No scene active (individual channels set manually) |
+| **Contact** | Shows "Open" or "Closed" reflecting GPIO pin state | Shows "Unknown" if GPIO is unavailable |
+
+**If ENTTEC shows red:** The controller will automatically attempt to reconnect. Check that the USB adapter is plugged in, that `ftdi_sio` is not loaded (`lsmod | grep ftdi_sio`), and review logs with `sudo journalctl -u dmx -f`.
+
+**If DMX shows red:** The DMX refresh thread has stopped, which should not happen under normal conditions. Restart the service with `sudo systemctl restart dmx`.
+
+### Emergency Procedures
+
+#### Software Blackout
+Press the **Emergency Blackout** button in the web UI, or send:
+```bash
+curl -X POST http://<pi-ip>:5000/api/blackout -H "Authorization: Bearer <token>"
+```
+This immediately zeros all output channels (fog, LEDs, strobe, dimmer) while keeping the safety channel valid. The fixture stops producing fog and turns off all lights but remains responsive to new commands.
+
+#### Hardware Kill
+If the software is unresponsive:
+1. **Disconnect the USB cable** between the ENTTEC adapter and the fog machine. Without valid DMX frames, the fixture's safety channel interlock will cause it to stop responding.
+2. **Disconnect power** to the fog machine as a last resort.
+
+#### Recovering from Blackout
+After a blackout, the fixture is still in a responsive state (safety channel = 100). Simply select any scene (A, B, C, or D) to resume normal operation.
+
+### Fog Machine Safety
+
+**Heat hazard:** The DJPOWER H-IP20V heats fog fluid to high temperatures internally. Do not touch the nozzle or internal components during or immediately after use.
+
+**Fog fluid:** Use only manufacturer-recommended water-based fog fluid. Never use flammable liquids. Running the machine dry can damage the heat exchanger — monitor fluid levels.
+
+**Ventilation:** Dense fog can:
+- Trigger smoke detectors and fire suppression systems — coordinate with venue management
+- Reduce visibility in emergency exits — position the machine so fog does not accumulate in exit paths
+- Cause respiratory irritation in enclosed spaces — ensure adequate airflow
+
+**Duty cycle:** Although this controller can command continuous fog output, the machine has physical limits. Excessive continuous use without allowing the heater to recover may reduce fog density or trigger the machine's internal thermal protection. Scene B defaults to a 10-second duration to encourage pulsed operation.
+
+### Trigger Timing and Behavior
+
+When a trigger fires (via GPIO contact closure or the web Trigger button):
+
+1. **Scene B activates immediately** — all channels snap to Scene B values
+2. **A countdown timer starts** — default 10 seconds (configurable from 0.5 to 300 seconds)
+3. **Scene A restores automatically** — when the timer expires, all channels return to Scene A (all off)
+
+**Re-triggering:** If a trigger fires while Scene B is already active, the timer resets. The machine stays on Scene B for a fresh full duration from the new trigger. Triggers do not stack.
+
+**Manual scene changes:** Selecting any scene (A, B, C, D) from the web UI cancels any active trigger timer. The manually selected scene stays active until you change it.
+
+### GPIO Wiring and Behavior
+
+The GPIO trigger uses a simple **contact closure** (dry contact) between GPIO pin 17 and GND:
+
+```
+GPIO Pin 17 ──── Contact Switch ──── GND
+                (normally open)
+```
+
+- **Internal pull-up** is enabled, so pin 17 reads HIGH (1) when the contact is open
+- **Closing the contact** pulls the pin LOW (0), which triggers Scene B
+- **Debounce window** of 300 ms prevents multiple triggers from switch bounce
+- **No external resistor needed** — the internal pull-up is sufficient
+- If the GPIO hardware is unavailable (e.g., not running on a Raspberry Pi), the controller continues to work normally via the web interface only
+
+### Network Security Considerations
+
+The controller listens on **port 5000 on all interfaces** (0.0.0.0). Anyone on your network can access the web interface and control the fog machine.
+
+**To secure the controller:**
+- **API token** — If installed via `install.sh`, a random token is generated automatically. All API endpoints (except `/` and `/api/health`) require this token. The web UI stores the token in the browser after you provide it once via `?token=<your-token>` in the URL.
+- **Firewall** — Restrict access to port 5000 to trusted IPs:
+  ```bash
+  sudo ufw allow from 192.168.1.0/24 to any port 5000  # allow local network only
+  ```
+- **Physical security** — If the Raspberry Pi is in a public area, ensure the GPIO trigger wiring cannot be tampered with.
+
+**Without an API token**, anyone on the network can activate the fog machine, change scenes, or trigger a blackout. Set a token if operating in a shared or public network environment.
+
+### Auto-Recovery Behavior
+
+The controller is designed to recover automatically from common hardware issues:
+
+| Failure | Recovery |
+|---------|----------|
+| **ENTTEC USB disconnected** | DMX thread detects errors within 3 frames, attempts reconnection with exponential backoff (1s to 10s). Plug the adapter back in and it will reconnect automatically. |
+| **GPIO read error** | GPIO monitor retries 3 times, then fully re-initializes the GPIO subsystem. No operator action needed. |
+| **Service crash** | systemd restarts the service automatically after 5 seconds (`Restart=on-failure`). |
+| **Config file corrupted** | Falls back to built-in default scenes. Safety channel values are force-corrected to 100. |
+
+Check `sudo journalctl -u dmx -f` to see live recovery messages.
+
+### Scene Configuration Tips
+
+- **Scene A** is the "off" scene — it is applied at startup and after every trigger timer expires. Keep all output channels at 0 (with safety channel at 100).
+- **Scene B** is the "triggered" scene — this is what fires on GPIO contact closure. Configure it with the fog level and LED colors you want for your triggered effect.
+- **Scenes C and D** are custom scenes for manual use. Use them for ambient lighting, testing, or alternate effects.
+- Scene changes are **atomic** — all channels update in a single operation, so you will never see a partial scene.
+- Scene edits made in the web UI are **saved to disk immediately** and persist across reboots.
+
+---
+
 ## Configuration
 
 Edit scene presets and timing in `app.py` (or `/opt/dmx/app.py` if installed via the installer) under the `Config` class. The controller persists scene updates to `/var/lib/dmx/config.json` by default.
