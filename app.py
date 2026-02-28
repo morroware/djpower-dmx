@@ -19,18 +19,29 @@ from pyftdi.ftdi import Ftdi
 import importlib
 import importlib.util
 
-# Detect GPIO library (will work on Pi 5)
+# Detect GPIO libraries (gpiod preferred, lgpio as fallback; works on Pi 4 & Pi 5)
 GPIO_AVAILABLE = False
 GPIO_LIB = None
 gpiod = None
 lgpio = None
 
+# Import ALL available GPIO libraries so init_gpio() can fall back between them.
 if importlib.util.find_spec("gpiod"):
-    gpiod = importlib.import_module("gpiod")
+    try:
+        gpiod = importlib.import_module("gpiod")
+    except Exception:
+        gpiod = None
+
+if importlib.util.find_spec("lgpio"):
+    try:
+        lgpio = importlib.import_module("lgpio")
+    except Exception:
+        lgpio = None
+
+if gpiod is not None:
     GPIO_AVAILABLE = True
     GPIO_LIB = 'gpiod'
-elif importlib.util.find_spec("lgpio"):
-    lgpio = importlib.import_module("lgpio")
+elif lgpio is not None:
     GPIO_AVAILABLE = True
     GPIO_LIB = 'lgpio'
 else:
@@ -589,7 +600,14 @@ def _open_lgpio_line(chip_id):
 
 
 def init_gpio():
-    """Initialize GPIO for contact closure detection"""
+    """Initialize GPIO for contact closure detection.
+
+    Tries the preferred library first (gpiod), then falls back to the other
+    (lgpio) if all chips fail.  This is important for Pi 4 where gpiod may
+    have version/compatibility issues while lgpio works fine.
+    """
+    global GPIO_LIB
+
     if not GPIO_AVAILABLE:
         print("GPIO not available (not running on Raspberry Pi)")
         return False
@@ -608,32 +626,54 @@ def init_gpio():
         state.gpio_chip = None
         state.gpio_chip_id = None
 
-    try:
-        if GPIO_LIB == 'gpiod':
-            for chip_id in _gpiochip_candidates():
-                try:
-                    state.gpio_chip, state.gpio_line = _open_gpiod_line(chip_id)
-                    state.gpio_ready = True
-                    state.gpio_chip_id = chip_id
-                    print(f"GPIO initialized (gpiod) - {chip_id} pin {config.CONTACT_PIN} with pull-up")
-                    return True
-                except Exception as e:
-                    print(f"GPIO init failed on {chip_id}: {e}")
+    # Build ordered list of libraries to attempt.
+    # Preferred library first, then fallback.
+    libs_to_try = []
+    if GPIO_LIB == 'gpiod':
+        libs_to_try.append('gpiod')
+        if lgpio is not None:
+            libs_to_try.append('lgpio')
+    elif GPIO_LIB == 'lgpio':
+        libs_to_try.append('lgpio')
+        if gpiod is not None:
+            libs_to_try.append('gpiod')
+    else:
+        if gpiod is not None:
+            libs_to_try.append('gpiod')
+        if lgpio is not None:
+            libs_to_try.append('lgpio')
 
-        elif GPIO_LIB == 'lgpio':
-            for chip_id in _gpiochip_candidates():
-                try:
-                    state.gpio_chip = _open_lgpio_line(chip_id)
-                    state.gpio_ready = True
-                    state.gpio_chip_id = chip_id
-                    print(f"GPIO initialized (lgpio) - {chip_id} pin {config.CONTACT_PIN} with pull-up")
-                    return True
-                except Exception as e:
-                    print(f"GPIO init failed on {chip_id}: {e}")
+    for lib in libs_to_try:
+        try:
+            if lib == 'gpiod':
+                for chip_id in _gpiochip_candidates():
+                    try:
+                        state.gpio_chip, state.gpio_line = _open_gpiod_line(chip_id)
+                        state.gpio_ready = True
+                        state.gpio_chip_id = chip_id
+                        GPIO_LIB = 'gpiod'
+                        print(f"GPIO initialized (gpiod) - {chip_id} pin {config.CONTACT_PIN} with pull-up")
+                        return True
+                    except Exception as e:
+                        print(f"GPIO init failed on {chip_id} (gpiod): {e}")
 
-    except Exception as e:
-        print(f"GPIO initialization failed: {e}")
+            elif lib == 'lgpio':
+                for chip_id in _gpiochip_candidates():
+                    try:
+                        state.gpio_chip = _open_lgpio_line(chip_id)
+                        state.gpio_ready = True
+                        state.gpio_chip_id = chip_id
+                        GPIO_LIB = 'lgpio'
+                        print(f"GPIO initialized (lgpio) - {chip_id} pin {config.CONTACT_PIN} with pull-up")
+                        return True
+                    except Exception as e:
+                        print(f"GPIO init failed on {chip_id} (lgpio): {e}")
+
+        except Exception as e:
+            print(f"GPIO initialization failed ({lib}): {e}")
+
     state.gpio_ready = False
+    print("GPIO: all libraries and chips exhausted — GPIO trigger unavailable")
     return False
 
 
