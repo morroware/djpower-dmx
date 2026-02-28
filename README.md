@@ -11,7 +11,6 @@ A Python-based DMX lighting controller for the **DJPOWER H-IP20V** fog machine (
 - **Live Control** - Real-time sliders for fog, LEDs (RGBA), strobe, dimmer, and effects
 - **Emergency Blackout** - One-button kill to zero all channels instantly
 - **Auto-start** - Runs as a systemd service, starts on boot
-- **Optional API Token** - Protect API endpoints with a simple bearer token
 - **Health Check** - `/api/health` endpoint for monitoring and install verification
 - **Auto-recovery** - Automatic ENTTEC USB reconnection and GPIO re-initialization
 
@@ -75,11 +74,11 @@ Open `http://<your-pi-ip>:5000` in a browser to access the web interface.
 3. Creates udev rules so the ENTTEC adapter is accessible without root
 4. Stops any existing DMX service (safe for reinstalls/upgrades)
 5. Copies application files to `/opt/dmx`
-6. Creates a Python virtual environment and installs dependencies
-7. Generates an API token and stores it in `/etc/dmx/dmx.env`
-8. Creates and enables a `dmx` systemd service
-9. Starts the service and runs a health check
-10. Displays the web interface URL and API token
+6. Creates a persistent config directory at `/var/lib/dmx`
+7. Creates an environment file at `/etc/dmx/dmx.env`
+8. Creates a Python virtual environment and installs dependencies
+9. Creates and enables a `dmx` systemd service
+10. Starts the service and runs a health check
 
 ### Reinstalling / Upgrading
 
@@ -91,7 +90,7 @@ git pull
 sudo ./install.sh
 ```
 
-Existing configuration (`/var/lib/dmx/config.json`) and API tokens (`/etc/dmx/dmx.env`) are preserved across reinstalls.
+Existing configuration (`/var/lib/dmx/config.json`) and environment settings (`/etc/dmx/dmx.env`) are preserved across reinstalls.
 
 ## Uninstall
 
@@ -105,7 +104,7 @@ This will:
 - Stop and disable the systemd service
 - Remove application files from `/opt/dmx`
 - Remove udev rules and the ftdi_sio blacklist
-- Optionally remove saved configuration and API tokens (you will be prompted)
+- Optionally remove saved configuration and environment files (you will be prompted)
 
 System packages (`python3`, `libusb`, etc.) are left in place.
 
@@ -309,7 +308,7 @@ The web interface displays four status indicators in the header:
 #### Software Blackout
 Press the **Emergency Blackout** button in the web UI, or send:
 ```bash
-curl -X POST http://<pi-ip>:5000/api/blackout -H "Authorization: Bearer <token>"
+curl -X POST http://<pi-ip>:5000/api/blackout
 ```
 This immediately zeros all output channels (fog, LEDs, strobe, dimmer) while keeping the safety channel valid. The fixture stops producing fog and turns off all lights but remains responsive to new commands.
 
@@ -363,17 +362,18 @@ GPIO Pin 17 ──── Contact Switch ──── GND
 
 ### Network Security Considerations
 
-The controller listens on **port 5000 on all interfaces** (0.0.0.0). Anyone on your network can access the web interface and control the fog machine.
+The controller listens on **port 5000 on all interfaces** (0.0.0.0) with **no authentication**. Anyone on your network can access the web interface and control the fog machine.
 
 **To secure the controller:**
-- **API token** — If installed via `install.sh`, a random token is generated automatically. All API endpoints (except `/` and `/api/health`) require this token. The web UI stores the token in the browser after you provide it once via `?token=<your-token>` in the URL.
 - **Firewall** — Restrict access to port 5000 to trusted IPs:
   ```bash
   sudo ufw allow from 192.168.1.0/24 to any port 5000  # allow local network only
+  sudo ufw deny 5000/tcp                                # block all other access
   ```
+- **Isolated network** — Run the Raspberry Pi on a dedicated network or VLAN that is not accessible from untrusted devices.
 - **Physical security** — If the Raspberry Pi is in a public area, ensure the GPIO trigger wiring cannot be tampered with.
 
-**Without an API token**, anyone on the network can activate the fog machine, change scenes, or trigger a blackout. Set a token if operating in a shared or public network environment.
+If the controller is exposed to an untrusted network, anyone can activate the fog machine, change scenes, or trigger a blackout. Always restrict access at the network level.
 
 ### Auto-Recovery Behavior
 
@@ -407,7 +407,6 @@ Edit scene presets and timing in `app.py` (or `/opt/dmx/app.py` if installed via
 - `SCENE_B_DURATION` - How long the triggered scene lasts in seconds (default: 10)
 - `SCENES` - Channel values for each of the four scenes
 - `DMX_FTDI_URL` - Environment variable to select a specific FTDI device (default: `ftdi://0403:6001/1`)
-- `DMX_API_TOKEN` - Optional environment variable to require an API token for `/api/*` endpoints
 
 After editing, restart the service:
 
@@ -415,52 +414,21 @@ After editing, restart the service:
 sudo systemctl restart dmx
 ```
 
-### API Authentication (Optional)
-
-If installed via `install.sh`, an API token is automatically generated and stored in `/etc/dmx/dmx.env`. The installer prints the token at the end of the installation.
-
-To view the current token:
-
-```bash
-sudo cat /etc/dmx/dmx.env
-```
-
-To set a custom token manually, edit the environment file:
-
-```bash
-sudo nano /etc/dmx/dmx.env
-```
-
-Then restart the service:
-
-```bash
-sudo systemctl restart dmx
-```
-
-Send the token via either header:
-
-- `Authorization: Bearer <token>`
-- `X-Api-Token: <token>`
-
-> **Note:** Without a token, the API is open to anyone with network access to port 5000.
-
-The built-in web UI supports tokens by adding `?token=<your-token>` once in the URL. It will store the token in your browser and remove it from the URL on refresh.
-
 ## API Endpoints
 
-| Method   | Endpoint            | Auth | Description                                |
-|----------|---------------------|------|--------------------------------------------|
-| GET      | `/`                 | No   | Web interface                              |
-| GET      | `/api/health`       | No   | Health check (200 = ok, 503 = degraded)    |
-| GET      | `/api/status`       | Yes  | System status and channel values           |
-| POST     | `/api/trigger`      | Yes  | Fire the trigger sequence                  |
-| POST     | `/api/scene/<name>` | Yes  | Apply a scene (scene_a through scene_d)    |
-| GET      | `/api/scenes`       | Yes  | List all scenes and their channels         |
-| POST     | `/api/channel`      | Yes  | Set a single channel `{channel, value}`    |
-| POST     | `/api/blackout`     | Yes  | Emergency blackout (safety channel kept valid) |
-| GET/POST | `/api/config`       | Yes  | Read or update scene config and duration   |
+| Method   | Endpoint            | Description                                |
+|----------|---------------------|--------------------------------------------|
+| GET      | `/`                 | Web interface                              |
+| GET      | `/api/health`       | Health check (200 = ok, 503 = degraded)    |
+| GET      | `/api/status`       | System status and channel values           |
+| POST     | `/api/trigger`      | Fire the trigger sequence                  |
+| POST     | `/api/scene/<name>` | Apply a scene (scene_a through scene_d)    |
+| GET      | `/api/scenes`       | List all scenes and their channels         |
+| POST     | `/api/channel`      | Set a single channel `{channel, value}`    |
+| POST     | `/api/blackout`     | Emergency blackout (safety channel kept valid) |
+| GET/POST | `/api/config`       | Read or update scene config and duration   |
 
-**Auth** column: "Yes" means the `DMX_API_TOKEN` is required if one is set. "No" means the endpoint is always accessible.
+All endpoints are open (no authentication). Restrict access via network-level controls (firewall, VPN) if needed.
 
 ## File Layout
 
@@ -474,7 +442,7 @@ The built-in web UI supports tokens by adding `?token=<your-token>` once in the 
 | `requirements.txt` | Python dependencies |
 | `/opt/dmx/` | Installed application (created by installer) |
 | `/var/lib/dmx/config.json` | Persisted scene configuration |
-| `/etc/dmx/dmx.env` | API token and environment variables |
+| `/etc/dmx/dmx.env` | Environment variables (config path, FTDI URL) |
 | `/etc/systemd/system/dmx.service` | Systemd service unit |
 | `/etc/udev/rules.d/99-ftdi-dmx.rules` | FTDI USB permissions |
 | `/etc/modprobe.d/ftdi-blacklist.conf` | Blocks ftdi_sio kernel driver |
