@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 # DMX Controller - Automated Installer
-# For Raspberry Pi (tested on Pi 5 / Bookworm)
+# For Raspberry Pi (Pi 4 & Pi 5, Bookworm)
 # ============================================
 set -e
 
