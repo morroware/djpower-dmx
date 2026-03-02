@@ -6,6 +6,7 @@ A Python-based DMX lighting controller for the **DJPOWER H-IP20V** fog machine (
 
 - **Web Interface** - Control all 16 DMX channels via a modern dark-themed UI
 - **GPIO Trigger** - Automatic fog/lighting sequences via contact closure (pin 17)
+- **GPIO Safety Toggle** - Hardware safety interlock switch (pin 27) blocks operation when OFF
 - **Scene Management** - 4 scenes (A-D), save/recall custom settings from the UI
 - **ENTTEC Support** - Communicates over ENTTEC Open DMX USB (FTDI-based)
 - **Live Control** - Real-time sliders for fog, LEDs (RGBA), strobe, dimmer, and effects
@@ -27,6 +28,7 @@ A Python-based DMX lighting controller for the **DJPOWER H-IP20V** fog machine (
 Raspberry Pi USB --> ENTTEC Open DMX USB --> (XLR) --> DJPOWER H-IP20V
 
 GPIO Pin 17 --> Contact closure switch --> GND
+GPIO Pin 27 --> Safety toggle switch (ON = tied to GND)
 ```
 
 ## DMX Channel Map (16-channel mode)
@@ -249,6 +251,14 @@ Adjust controls to your desired settings, pick a scene slot (A-D), and click **S
 
 ### GPIO Trigger
 Connect a contact closure between **GPIO pin 17** and **GND**. When the contact closes, the controller fires the trigger sequence (same as the web Trigger button). The pin uses an internal pull-up, so no external resistor is needed.
+
+### GPIO Safety Toggle
+Connect a maintained toggle switch between **GPIO pin 27** and **GND**.
+
+- **Switch ON (closed to GND)** = SAFE to operate
+- **Switch OFF (open)** = LOCKED OUT (trigger + non-off scenes blocked)
+
+The UI shows this state as **Safety SW: SAFE/LOCK** and disables trigger operations while locked.
 
 ---
 

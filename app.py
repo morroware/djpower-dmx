@@ -65,6 +65,7 @@ class Config:
 
     # GPIO Settings
     CONTACT_PIN = 17
+    SAFETY_SWITCH_PIN = 27
     GPIO_CHIP = None  # Optional override: int index or string like "gpiochip0" or "/dev/gpiochip0"
 
     # DMX Settings
@@ -264,6 +265,7 @@ class SystemState:
         self.scene_b_timer = None
         self.timer_lock = Lock()  # Protects scene_b_timer access
         self.gpio_line = None
+        self.gpio_safety_line = None
         self.gpio_chip = None
         self.gpio_chip_id = None
         self.gpio_ready = False  # Explicit flag for GPIO readiness
@@ -558,20 +560,29 @@ def _open_gpiod_line(chip_id):
         request = gpiod.request_lines(
             chip_path,
             consumer="dmx_controller",
-            config={config.CONTACT_PIN: line_settings},
+            config={
+                config.CONTACT_PIN: line_settings,
+                config.SAFETY_SWITCH_PIN: line_settings,
+            },
         )
         return None, request  # v2: no separate Chip object needed
 
     # gpiod v1 API: create Chip then request the line
     chip = gpiod.Chip(chip_id) if chip_id is not None else None
     try:
-        line = chip.get_line(config.CONTACT_PIN)
-        line.request(
+        contact_line = chip.get_line(config.CONTACT_PIN)
+        contact_line.request(
             consumer="dmx_controller",
             type=gpiod.LINE_REQ_DIR_IN,
             flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP,
         )
-        return chip, line
+        safety_line = chip.get_line(config.SAFETY_SWITCH_PIN)
+        safety_line.request(
+            consumer="dmx_controller",
+            type=gpiod.LINE_REQ_DIR_IN,
+            flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP,
+        )
+        return chip, (contact_line, safety_line)
     except Exception:
         if chip is not None:
             try:
@@ -590,6 +601,7 @@ def _open_lgpio_line(chip_id):
     chip = lgpio.gpiochip_open(chip_id)
     try:
         lgpio.gpio_claim_input(chip, config.CONTACT_PIN, lgpio.SET_PULL_UP)
+        lgpio.gpio_claim_input(chip, config.SAFETY_SWITCH_PIN, lgpio.SET_PULL_UP)
         return chip
     except Exception:
         try:
@@ -616,6 +628,8 @@ def init_gpio():
         try:
             if GPIO_LIB == 'gpiod' and state.gpio_line is not None:
                 state.gpio_line.release()
+            if GPIO_LIB == 'gpiod' and state.gpio_safety_line is not None:
+                state.gpio_safety_line.release()
             if GPIO_LIB == 'gpiod' and state.gpio_chip is not None:
                 state.gpio_chip.close()
             if GPIO_LIB == 'lgpio' and state.gpio_chip is not None:
@@ -623,6 +637,7 @@ def init_gpio():
         except Exception as e:
             print(f"WARNING: GPIO cleanup before init failed: {e}")
         state.gpio_line = None
+        state.gpio_safety_line = None
         state.gpio_chip = None
         state.gpio_chip_id = None
 
@@ -648,7 +663,12 @@ def init_gpio():
             if lib == 'gpiod':
                 for chip_id in _gpiochip_candidates():
                     try:
-                        state.gpio_chip, state.gpio_line = _open_gpiod_line(chip_id)
+                        state.gpio_chip, opened_line = _open_gpiod_line(chip_id)
+                        if isinstance(opened_line, tuple):
+                            state.gpio_line, state.gpio_safety_line = opened_line
+                        else:
+                            state.gpio_line = opened_line
+                            state.gpio_safety_line = None
                         state.gpio_ready = True
                         state.gpio_chip_id = chip_id
                         GPIO_LIB = 'gpiod'
@@ -689,27 +709,56 @@ def _gpio_value_to_int(val):
     return int(val)
 
 
+def _read_gpio_pin(pin):
+    if GPIO_LIB == 'gpiod':
+        try:
+            return _gpio_value_to_int(state.gpio_line.get_value(pin))
+        except TypeError:
+            line = state.gpio_line if pin == config.CONTACT_PIN else state.gpio_safety_line
+            if line is None:
+                return None
+            return _gpio_value_to_int(line.get_value())
+    if GPIO_LIB == 'lgpio':
+        return lgpio.gpio_read(state.gpio_chip, pin)
+    return None
+
+
 def check_contact_state():
     """Check current contact closure state. Returns 0 (closed) or 1 (open), or None."""
     if not GPIO_AVAILABLE or not state.gpio_ready:
         return None
 
     try:
-        if GPIO_LIB == 'gpiod':
-            try:
-                val = state.gpio_line.get_value()
-            except TypeError:
-                val = state.gpio_line.get_value(config.CONTACT_PIN)
-            return _gpio_value_to_int(val)
-        elif GPIO_LIB == 'lgpio':
-            return lgpio.gpio_read(state.gpio_chip, config.CONTACT_PIN)
+        return _read_gpio_pin(config.CONTACT_PIN)
     except Exception as e:
         print(f"WARNING: GPIO read error: {e}")
         return None
 
 
+def check_safety_switch_state():
+    """Check safety toggle switch state. 0=ON/safe, 1=OFF/unsafe."""
+    if not GPIO_AVAILABLE or not state.gpio_ready:
+        return None
+
+    try:
+        return _read_gpio_pin(config.SAFETY_SWITCH_PIN)
+    except Exception as e:
+        print(f"WARNING: Safety GPIO read error: {e}")
+        return None
+
+
+def is_safe_to_operate():
+    """True when safety switch allows machine operation."""
+    safety_state = check_safety_switch_state()
+    return safety_state == 0
+
+
 def trigger_sequence():
     """Execute the lighting sequence (thread-safe)"""
+    if not is_safe_to_operate():
+        print("Trigger ignored: safety switch is OFF/unsafe")
+        return False
+
     print("\nTRIGGER DETECTED!")
 
     with state.timer_lock:
@@ -731,6 +780,7 @@ def trigger_sequence():
         state.scene_b_timer.start()
 
     print(f"Timer set: Scene A (OFF) in {config.SCENE_B_DURATION} seconds")
+    return True
 
 # ============================================
 # Flask Routes
@@ -759,6 +809,7 @@ def index():
 def api_status():
     """Get current system status"""
     contact_state = check_contact_state()
+    safety_switch_state = check_safety_switch_state()
 
     return jsonify({
         'enttec_connected': state.ftdi_device is not None,
@@ -767,6 +818,8 @@ def api_status():
         'dmx_running': state.dmx_running and (state.dmx_thread is not None and state.dmx_thread.is_alive()),
         'current_scene': state.current_scene,
         'contact_state': 'closed' if contact_state == 0 else 'open' if contact_state == 1 else 'unknown',
+        'safety_switch_state': 'on' if safety_switch_state == 0 else 'off' if safety_switch_state == 1 else 'unknown',
+        'safe_to_operate': is_safe_to_operate(),
         'gpio_available': GPIO_AVAILABLE,
         'gpio_ready': state.gpio_ready,
         'scene_b_duration': config.SCENE_B_DURATION,
@@ -777,13 +830,16 @@ def api_status():
 @app.route('/api/trigger', methods=['POST'])
 def api_trigger():
     """Manually trigger the sequence"""
-    trigger_sequence()
-    return jsonify({'success': True})
+    if trigger_sequence():
+        return jsonify({'success': True})
+    return jsonify({'success': False, 'error': 'Safety switch is OFF - operation blocked'}), 409
 
 
 @app.route('/api/scene/<scene_name>', methods=['POST'])
 def api_apply_scene(scene_name):
     """Apply a specific scene"""
+    if scene_name != 'scene_a' and not is_safe_to_operate():
+        return jsonify({'error': 'Safety switch is OFF - operation blocked'}), 409
     with state.timer_lock:
         if state.scene_b_timer is not None:
             state.scene_b_timer.cancel()
@@ -902,6 +958,7 @@ def api_config():
             'scene_d': config.SCENES['scene_d']['channels'],
             'scene_b_duration': config.SCENE_B_DURATION,
             'contact_pin': config.CONTACT_PIN,
+            'safety_switch_pin': config.SAFETY_SWITCH_PIN,
         })
 
 # ============================================
@@ -921,6 +978,7 @@ def api_health():
         'dmx_running': healthy,
         'gpio_available': GPIO_AVAILABLE,
         'gpio_ready': state.gpio_ready,
+        'safe_to_operate': is_safe_to_operate(),
     }), status_code
 
 # ============================================
@@ -933,6 +991,7 @@ _initialized = False
 def _gpio_monitor():
     """Background thread: polls GPIO for contact closure events with debounce."""
     last_state = None
+    last_safety_state = None
     last_trigger_time = 0.0
     consecutive_errors = 0
     max_errors_before_reinit = 3
@@ -948,6 +1007,17 @@ def _gpio_monitor():
                     continue
 
             current_state = check_contact_state()
+            safety_state = check_safety_switch_state()
+            if safety_state is not None:
+                if last_safety_state == 0 and safety_state == 1:
+                    print("Safety switch turned OFF - forcing Scene A")
+                    with state.timer_lock:
+                        if state.scene_b_timer is not None:
+                            state.scene_b_timer.cancel()
+                            state.scene_b_timer = None
+                    apply_scene('scene_a')
+                last_safety_state = safety_state
+
             if current_state is not None:
                 now = time.monotonic()
                 if (last_state == 1 and current_state == 0
@@ -994,6 +1064,8 @@ def _cleanup():
         try:
             if GPIO_LIB == 'gpiod' and state.gpio_line is not None:
                 state.gpio_line.release()
+            if GPIO_LIB == 'gpiod' and state.gpio_safety_line is not None:
+                state.gpio_safety_line.release()
             if GPIO_LIB == 'gpiod' and state.gpio_chip is not None:
                 state.gpio_chip.close()
             if GPIO_LIB == 'lgpio' and state.gpio_chip is not None:
@@ -1048,7 +1120,8 @@ def _initialize():
     print()
     print("   Web interface: http://0.0.0.0:5000")
     if GPIO_AVAILABLE and state.gpio_ready:
-        print(f"   GPIO Pin {config.CONTACT_PIN} monitoring active")
+        print(f"   GPIO trigger pin {config.CONTACT_PIN} monitoring active")
+        print(f"   GPIO safety switch pin {config.SAFETY_SWITCH_PIN} monitoring active")
     elif GPIO_AVAILABLE:
         print("   GPIO available but init failed - monitor will retry automatically")
     print("=" * 60)

@@ -428,6 +428,10 @@
                     <div class="status-label">Contact</div>
                     <div class="status-value" id="contact-state">—</div>
                 </div>
+                <div class="status-item">
+                    <div class="status-label">Safety SW</div>
+                    <div class="status-value" id="safety-switch-state">—</div>
+                </div>
             </div>
         </div>
         
@@ -437,7 +441,7 @@
                 <h2>⚡ Quick Controls</h2>
                 
                 <div class="button-group">
-                    <button class="btn-success" onclick="trigger()">
+                    <button id="trigger-button" class="btn-success" onclick="trigger()">
                         🔔 Trigger
                     </button>
                     <button class="btn-danger" onclick="applyScene('scene_a')">
@@ -653,6 +657,16 @@
                     
                     const contactText = {'open': 'OPEN', 'closed': 'CLOSED'}[data.contact_state] || '—';
                     document.getElementById('contact-state').textContent = contactText;
+
+                    const safetyText = {'on': 'SAFE', 'off': 'LOCK'}[data.safety_switch_state] || '—';
+                    const safetyEl = document.getElementById('safety-switch-state');
+                    safetyEl.textContent = safetyText;
+                    safetyEl.className = 'status-value ' + (data.safe_to_operate ? 'online' : 'offline');
+
+                    const triggerBtn = document.getElementById('trigger-button');
+                    triggerBtn.disabled = !data.safe_to_operate;
+                    triggerBtn.style.opacity = data.safe_to_operate ? '1' : '0.5';
+                    triggerBtn.title = data.safe_to_operate ? '' : 'Safety switch is OFF';
                     
                     // Update current channels
                     if (data.channels) {
@@ -768,7 +782,7 @@
                 .then(response => response.json().then(data => ({ok: response.ok, data})))
                 .then(({ok, data}) => {
                     if (!ok) {
-                        throw new Error('Trigger failed');
+                        throw new Error(data.error || 'Trigger failed');
                     }
                     if (data.success) {
                         showToast('✅ Trigger activated!');
@@ -777,7 +791,7 @@
                 })
                 .catch(error => {
                     console.error('Error:', error);
-                    showToast('❌ Error triggering', true);
+                    showToast(`❌ ${error.message || 'Error triggering'}`, true);
                 });
         }
         
@@ -793,7 +807,7 @@
                 .then(response => response.json().then(data => ({ok: response.ok, data})))
                 .then(({ok, data}) => {
                     if (!ok) {
-                        throw new Error('Scene apply failed');
+                        throw new Error(data.error || 'Scene apply failed');
                     }
                     if (data.success) {
                         showToast('Scene: ' + (sceneNames[sceneName] || sceneName));
@@ -802,7 +816,7 @@
                 })
                 .catch(error => {
                     console.error('Error:', error);
-                    showToast('❌ Error applying scene', true);
+                    showToast(`❌ ${error.message || 'Error applying scene'}`, true);
                 });
         }
 
