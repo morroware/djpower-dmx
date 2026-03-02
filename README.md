@@ -31,6 +31,12 @@ GPIO Pin 17 --> Contact closure switch --> GND
 GPIO Pin 27 --> Safety toggle switch (ON = tied to GND)
 ```
 
+Pi 4 physical header references:
+
+- **GPIO17 (BCM 17)** = physical pin **11**
+- **GPIO27 (BCM 27)** = physical pin **13**
+- **GND** = physical pin **14** (or any GND pin)
+
 ## DMX Channel Map (16-channel mode)
 
 | Channel | Function           | Range                                  |
@@ -357,7 +363,12 @@ When a trigger fires (via GPIO contact closure or the web Trigger button):
 
 ### GPIO Wiring and Behavior
 
-The GPIO trigger uses a simple **contact closure** (dry contact) between GPIO pin 17 and GND:
+The controller uses two GPIO inputs with internal pull-ups:
+
+1. **Trigger input** on GPIO 17 (BCM) for momentary contact closures
+2. **Safety toggle input** on GPIO 27 (BCM) for maintained lockout state
+
+Trigger wiring (normally-open momentary switch):
 
 ```
 GPIO Pin 17 ──── Contact Switch ──── GND
@@ -368,7 +379,18 @@ GPIO Pin 17 ──── Contact Switch ──── GND
 - **Closing the contact** pulls the pin LOW (0), which triggers Scene B
 - **Debounce window** of 300 ms prevents multiple triggers from switch bounce
 - **No external resistor needed** — the internal pull-up is sufficient
-- If the GPIO hardware is unavailable (e.g., not running on a Raspberry Pi), the controller continues to work normally via the web interface only
+Safety toggle wiring (maintained ON/OFF switch):
+
+```
+GPIO Pin 27 ──── Safety Toggle ──── GND
+```
+
+- **Switch ON (closed to GND)** -> pin reads LOW (0) -> **SAFE TO OPERATE**
+- **Switch OFF (open)** -> pin reads HIGH (1) -> **LOCKED OUT**
+- While locked out, `/api/trigger` is blocked and scene applies for `scene_b`, `scene_c`, and `scene_d` return HTTP 409
+- If the safety switch is turned OFF during operation, the controller cancels any active trigger timer and forces Scene A
+
+If the GPIO hardware is unavailable (e.g., not running on a Raspberry Pi), the controller continues to run but GPIO-triggered and GPIO-safety behavior will remain unavailable until GPIO initialization succeeds.
 
 ### Network Security Considerations
 
@@ -413,6 +435,7 @@ Check `sudo journalctl -u dmx -f` to see live recovery messages.
 Edit scene presets and timing in `app.py` (or `/opt/dmx/app.py` if installed via the installer) under the `Config` class. The controller persists scene updates to `/var/lib/dmx/config.json` by default.
 
 - `CONTACT_PIN` - GPIO pin number for trigger input (default: 17)
+- `SAFETY_SWITCH_PIN` - GPIO pin number for maintained safety lockout input (default: 27)
 - `GPIO_CHIP` - Optional GPIO chip override (e.g., `0`, `gpiochip0`, `/dev/gpiochip0`). Auto-detects if unset.
 - `SCENE_B_DURATION` - How long the triggered scene lasts in seconds (default: 10)
 - `SCENES` - Channel values for each of the four scenes
@@ -437,6 +460,12 @@ sudo systemctl restart dmx
 | POST     | `/api/channel`      | Set a single channel `{channel, value}`    |
 | POST     | `/api/blackout`     | Emergency blackout (safety channel kept valid) |
 | GET/POST | `/api/config`       | Read or update scene config and duration   |
+
+Additional API state fields now exposed:
+
+- `/api/status` includes `safety_switch_state` (`on`, `off`, `unknown`) and `safe_to_operate` (boolean)
+- `/api/health` includes `safe_to_operate` (boolean)
+- `/api/config` includes `safety_switch_pin`
 
 All endpoints are open (no authentication). Restrict access via network-level controls (firewall, VPN) if needed.
 
@@ -497,11 +526,12 @@ dpkg -l | grep gpiod
 # Check GPIO chip is accessible
 gpioinfo gpiochip4 2>/dev/null || gpioinfo gpiochip0
 
-# Test pin 17 manually
+# Test pins manually (trigger + safety)
 gpioget gpiochip4 17
+gpioget gpiochip4 27
 ```
 
-If your GPIO chip is not `gpiochip4`, update `GPIO_CHIP` in `app.py` (or set it to `gpiochip0`), or use `gpioget gpiochip0 17` to verify the pin.
+If your GPIO chip is not `gpiochip4`, update `GPIO_CHIP` in `app.py` (or set it to `gpiochip0`), or use `gpioget gpiochip0 17` and `gpioget gpiochip0 27` to verify both pins.
 
 ### Web interface not loading
 ```bash
