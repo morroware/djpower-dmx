@@ -15,7 +15,12 @@ import signal
 import tempfile
 from threading import Lock, Timer, Thread
 
-from pyftdi.ftdi import Ftdi
+try:
+    from pyftdi.ftdi import Ftdi
+    FTDI_AVAILABLE = True
+except Exception as ftdi_import_error:
+    Ftdi = None
+    FTDI_AVAILABLE = False
 import importlib
 import importlib.util
 
@@ -233,19 +238,15 @@ def load_config():
         if 'scenes' in data:
             for key, scene in data['scenes'].items():
                 if key in config.SCENES:
-                    safe_channels = {}
-                    raw_channels = scene.get('channels', {})
-                    for ch_key, ch_value in raw_channels.items():
-                        channel = int(ch_key)
-                        value = int(ch_value)
-                        if not (1 <= channel <= config.DMX_CHANNELS):
-                            continue
-                        if channel == 16 and not (50 <= value <= 200):
-                            value = 100
-                        safe_channels[channel] = max(0, min(255, value))
                     config.SCENES[key]['name'] = scene.get('name', config.SCENES[key]['name'])
-                    if safe_channels:
-                        config.SCENES[key]['channels'] = safe_channels
+                    raw_channels = scene.get('channels', {})
+                    try:
+                        config.SCENES[key]['channels'] = _normalize_scene_channels(
+                            raw_channels,
+                            base_channels=config.SCENES[key]['channels'],
+                        )
+                    except (TypeError, ValueError) as e:
+                        print(f"WARNING: Invalid channel data in saved {key}; keeping previous values: {e}")
         print("Loaded saved configuration from disk")
     except Exception as e:
         print(f"WARNING: Could not load config (using defaults): {e}")
@@ -282,6 +283,11 @@ state = SystemState()
 
 def init_enttec():
     """Initialize ENTTEC Open DMX USB"""
+    if not FTDI_AVAILABLE:
+        state.enttec_last_error = f"pyftdi unavailable: {ftdi_import_error}"
+        print(f"ERROR: {state.enttec_last_error}")
+        return False
+
     def _candidate_urls(devices):
         urls = []
 
@@ -799,6 +805,27 @@ def _sanitize_channel_value(channel, value):
     return max(0, min(255, int(value)))
 
 
+def _normalize_scene_channels(raw_channels, base_channels=None):
+    """Validate scene channel map and merge onto a known-safe base.
+
+    Returns a complete channel map when a base is supplied, preserving any
+    unspecified channels instead of dropping them.
+    """
+    if not isinstance(raw_channels, dict):
+        raise ValueError("Scene channel data must be an object")
+
+    channels = dict(base_channels) if isinstance(base_channels, dict) else {}
+    for raw_channel, raw_value in raw_channels.items():
+        channel = int(raw_channel)
+        if not _validate_channel(channel):
+            raise ValueError(f"Channel out of range: {channel}")
+        channels[channel] = _sanitize_channel_value(channel, int(raw_value))
+
+    # Never permit an invalid safety value in normalized scenes.
+    channels[16] = _sanitize_channel_value(16, int(channels.get(16, 100)))
+    return channels
+
+
 @app.route('/')
 def index():
     """Main web interface - serve index.html directly"""
@@ -918,16 +945,12 @@ def api_config():
             if scene_key in data:
                 try:
                     raw = data[scene_key]
-                    if not isinstance(raw, dict):
-                        return jsonify({'error': f'Invalid data for {scene_key}'}), 400
-                    channels = {}
-                    for k, v in raw.items():
-                        channel = int(k)
-                        if not _validate_channel(channel):
-                            return jsonify({'error': f'Channel out of range in {scene_key}: {channel}'}), 400
-                        channels[channel] = _sanitize_channel_value(channel, int(v))
-                except (TypeError, ValueError):
-                    return jsonify({'error': f'Invalid channel data in {scene_key}'}), 400
+                    channels = _normalize_scene_channels(
+                        raw,
+                        base_channels=config.SCENES[scene_key]['channels'],
+                    )
+                except (TypeError, ValueError) as e:
+                    return jsonify({'error': f'Invalid channel data in {scene_key}: {e}'}), 400
                 config.SCENES[scene_key]['channels'] = channels
                 print(f"Updated {scene_key}: {config.SCENES[scene_key]['channels']}")
                 # Re-apply if it's the current scene
